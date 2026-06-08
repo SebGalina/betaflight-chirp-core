@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "betaflight-chirp-core"
+version = "0.1.0"
+description = "Betaflight closed-loop chirp / blackbox analysis core — decoder, FRF/Bode, step response, spectral, HTML report."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scipy>=1.10.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/SebGalina/betaflight-chirp-core"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["betaflight_chirp_core*"]

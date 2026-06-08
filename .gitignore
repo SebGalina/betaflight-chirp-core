@@ -1,0 +1,14 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# blackbox logs — NEVER commit: real flight logs carry GPS home-point coordinates
+*.bbl
+*.bfl
+tests/data/*
+!tests/data/.gitkeep
