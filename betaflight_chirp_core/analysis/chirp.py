@@ -1329,3 +1329,7 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
         "filter_suggestions": _filter_suggestions(throttle_map, config) if config else [],
         "noise_suggestions": _noise_suggestions(noise) + _filter_disable_notes(noise, config),
     }
+
+
+# Public alias — display metric reused by CLI front-ends (skill _print_human).
+noise_margin_db = _noise_margin_db

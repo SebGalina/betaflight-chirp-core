@@ -18,11 +18,12 @@ import pandas as pd
 
 from . import config as _config
 from . import decoder, signal
-from .analysis.chirp import analyse, build_pass
-from .report import build_report
+from .analysis.chirp import analyse, build_pass, noise_margin_db
+from .report import assemble_report, build_report
 
-__all__ = ["decode", "analyse_log", "build_report", "run", "AnalysisResult",
-           "decoder", "signal", "config", "analyse", "build_pass"]
+__all__ = ["decode", "analyse_log", "assemble_report", "build_report", "run",
+           "AnalysisResult", "decoder", "signal", "config", "analyse", "build_pass",
+           "noise_margin_db"]
 config = _config
 
 

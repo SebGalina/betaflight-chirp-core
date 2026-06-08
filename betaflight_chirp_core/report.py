@@ -1291,3 +1291,8 @@ def build_report(passes: list, lang: str = "fr") -> str:
     report = _assemble_report(passes, lang)
     primary_name = report["passes"][report["primary_index"]].get("file", "report")
     return _html_report(report, primary_name)
+
+
+# Public alias — the assembled report dict, for callers that render it
+# themselves (CLI text/JSON output) instead of taking the HTML.
+assemble_report = _assemble_report
