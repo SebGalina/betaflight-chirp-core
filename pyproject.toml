@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "betaflight-chirp-core"
-version = "0.1.1"
+version = "0.1.2"
 description = "Betaflight closed-loop chirp / blackbox analysis core — decoder, FRF/Bode, step response, spectral, HTML report."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+plot = ["matplotlib"]  # only needed for spectral/step plot_results (matplotlib figures)
 
 [project.urls]
 Homepage = "https://github.com/SebGalina/betaflight-chirp-core"
