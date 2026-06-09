@@ -1,0 +1,86 @@
+{
+ "chirp": {
+  "fr": "Chirp : un signal sinusoïdal dont la fréquence balaie lentement du bas vers le haut (ici ~0 à 500 Hz), injecté sur la consigne d'un axe. En mesurant comment le drone y répond fréquence par fréquence, on obtient sa réponse en fréquence (Bode) — la signature dynamique complète de la boucle de stabilisation.",
+  "en": "Chirp: a sine signal whose frequency slowly sweeps from low to high (here ~0 to 500 Hz), injected onto an axis' setpoint. Measuring how the drone responds frequency by frequency gives its frequency response (Bode) — the full dynamic signature of the stabilisation loop."
+ },
+ "gain": {
+  "fr": "Gain (dB) : rapport entre le mouvement obtenu (gyro) et le mouvement demandé (consigne), en décibels. 0 dB = le drone suit exactement la demande. Au-dessus de 0 dB il en fait trop (surréaction/résonance), en dessous il atténue. Une bosse de gain = tendance à osciller à cette fréquence.",
+  "en": "Gain (dB): ratio of the motion obtained (gyro) to the motion commanded (setpoint), in decibels. 0 dB = the drone tracks the command exactly. Above 0 dB it overreacts (overshoot/resonance), below it attenuates. A gain bump = tendency to oscillate there."
+ },
+ "phase": {
+  "fr": "Phase (°) : le retard entre la demande et la réponse, en degrés. Plus la fréquence monte, plus le retard s'accumule (filtres, inertie). Quand la phase atteint -180°, la correction arrive en opposition : si le gain est encore ≥ 0 dB à ce point, la boucle s'auto-entretient et oscille.",
+  "en": "Phase (°): the lag between command and response, in degrees. The higher the frequency, the more lag accumulates (filters, inertia). When phase reaches -180°, the correction arrives in opposition: if gain is still ≥ 0 dB there, the loop self-sustains and oscillates."
+ },
+ "phase_margin": {
+  "fr": "Marge de phase : la réserve de stabilité (degrés avant -180°). >45° = sain et amorti ; 30-45° = correct ; 15-30° = limite, ça commence à rebondir ; <15° = la boucle sonne. Classiquement lue au croisement 0 dB, mais ce point décroche sur une réponse très amortie ; le rapport reporte donc la marge GARANTIE déduite du pic de sensibilité Ms (PM ≥ 2·arcsin(1/2·Ms)) — d'où le repère f(Ms) sur les graphes, pas le croisement 0 dB. Baisser P/D ou filtrer redonne de la marge.",
+  "en": "Phase margin: the stability reserve (degrees before -180°). >45° = healthy and damped; 30-45° = fine; 15-30° = marginal, starts to bounce; <15° = the loop rings. Classically read at the 0 dB crossover, but that point breaks down on a very damped response; the report therefore states the GUARANTEED margin from the sensitivity peak Ms (PM ≥ 2·arcsin(1/2·Ms)) — hence the f(Ms) marker on the plots, not the 0 dB crossover. Lowering P/D or adding filtering restores margin."
+ },
+ "sensitivity": {
+  "fr": "Pic de sensibilité Ms : Ms = max|S(f)|, avec S = 1/(1+L) = 1−T la fonction de sensibilité (T étant la réponse boucle fermée mesurée par le chirp). C'est LE chiffre de robustesse : il borne la marge de phase par PM ≥ 2·arcsin(1/(2·Ms)). Physiquement Ms = à quel point la boucle amplifie les perturbations à sa fréquence la plus fragile f(Ms) — d'où la raie verticale. Repères : Ms ≲ 1.5 confortable et amorti ; ~2 limite ; >2 ça résonne (l'overshoot de la step monte, le propwash s'installe). Ms se baisse en redonnant de la marge (moins de P/D, ou plus de filtrage avant les PID).",
+  "en": "Sensitivity peak Ms: Ms = max|S(f)|, where S = 1/(1+L) = 1−T is the sensitivity function (T being the closed-loop response the chirp measures). It is THE robustness number: it bounds the phase margin via PM ≥ 2·arcsin(1/(2·Ms)). Physically Ms is how much the loop amplifies disturbances at its most fragile frequency f(Ms) — hence the vertical marker. Rules of thumb: Ms ≲ 1.5 comfortable and damped; ~2 marginal; >2 it rings (step overshoot climbs, propwash sets in). Lower Ms by restoring margin (less P/D, or more filtering before the PIDs)."
+ },
+ "crossover": {
+  "fr": "Crossover 0 dB : la fréquence où le gain passe sous 0 dB. C'est en gros la bande passante de l'axe — jusqu'où le drone suit fidèlement les ordres. Plus elle est haute, plus la réponse est vive, mais plus il faut de marge de phase pour rester stable.",
+  "en": "0 dB crossover: the frequency where gain drops below 0 dB. Roughly the axis bandwidth — how far the drone tracks commands faithfully. Higher = sharper response, but it needs more phase margin to stay stable."
+ },
+ "coherence": {
+  "fr": "Cohérence (0 à 1) : à quel point la réponse mesurée est réellement causée par l'excitation chirp, et non par du bruit/vibrations. 1 = mesure fiable. En dessous de 0.8 la courbe de gain/phase n'est pas fiable à cette fréquence — on l'affiche en grisé. La cohérence chute naturellement en haute fréquence.",
+  "en": "Coherence (0 to 1): how much of the measured response is really caused by the chirp excitation rather than noise/vibration. 1 = trustworthy. Below 0.8 the gain/phase curve is unreliable at that frequency — shown greyed out. Coherence naturally falls at high frequency (weaker signal)."
+ },
+ "resonance": {
+  "fr": "Résonance : un pic d'énergie marqué à une fréquence précise, dû au cadre, aux pales ou aux moteurs. Si elle remonte dans la boucle, elle fait vibrer/chauffer. On la traite par du filtrage (notch), PAS en touchant les PID — baisser les gains pour masquer une résonance dégrade le pilotage pour rien.",
+  "en": "Resonance: a sharp energy peak at a specific frequency, from the frame, props or motors. If it feeds into the loop it causes vibration/heat. Treat it with filtering (a notch), NOT by changing PIDs — lowering gains to mask a resonance degrades handling for nothing."
+ },
+ "filtering": {
+  "fr": "Filtrage (Betaflight) : l'ensemble des filtres qui nettoient le signal du gyro AVANT que les PID ne le voient, pour que la boucle ne réagisse pas au bruit (vibrations cadre/pales/moteurs). Pourquoi : ce bruit, amplifié surtout par le terme D, repart dans les moteurs → ESC/moteurs qui chauffent, et peut entretenir des oscillations. Comment, du plus ciblé au plus large : le RPM filter (encoches calées sur le régime moteur via la télémétrie), le dynamic notch (encoches qui pistent les résonances), puis les passe-bas gyro (LPF) et D-term qui rabotent tout le haut du spectre. Le compromis central : plus on filtre, plus on enlève de bruit, mais chaque filtre ajoute du retard de phase qui grignote la marge de stabilité — d'où la règle « filtrer juste ce qu'il faut, et figer le filtrage AVANT de régler les PID ».",
+  "en": "Filtering (Betaflight): the set of filters that clean the gyro signal BEFORE the PIDs see it, so the loop doesn't react to noise (frame/prop/motor vibration). Why: that noise, amplified mostly by the D term, feeds back into the motors → hot ESCs/motors, and can sustain oscillation. How, from most targeted to broadest: the RPM filter (notches locked to motor rpm via telemetry), the dynamic notch (notches tracking resonances), then the gyro and D-term lowpasses (LPF) that shave the whole top of the spectrum. The core trade-off: more filtering removes more noise, but every filter adds phase lag that eats into the stability margin — hence the rule 'filter just enough, and freeze the filtering BEFORE tuning the PIDs'."
+ },
+ "gyro_lpf": {
+  "fr": "Gyro lowpass (LPF) : filtre passe-bas sur le signal du gyroscope, avant tout calcul PID. Il enlève le bruit haute fréquence (moteurs/vibrations). Trop bas, il ajoute du retard de phase et déstabilise ; trop haut, il laisse passer le bruit dans les moteurs (chaleur). 'dyn' = la coupure suit le throttle entre deux bornes.",
+  "en": "Gyro lowpass (LPF): a lowpass filter on the gyro signal, before any PID maths. It removes high-frequency noise (motors/vibration). Too low it adds phase lag and destabilises; too high it lets noise into the motors (heat). 'dyn' = the cutoff follows throttle between two bounds."
+ },
+ "dterm_lpf": {
+  "fr": "D-term lowpass : filtre passe-bas sur le terme dérivé (D) des PID. Le D amplifie fortement le bruit, donc on le filtre plus que le reste. Souvent le filtre le plus critique : trop haut → moteurs chauds et bruit ; trop bas → D mou et retard qui ramène du propwash. À régler en priorité avec le RPM filter.",
+  "en": "D-term lowpass: a lowpass on the PID derivative (D) term. D strongly amplifies noise, so it is filtered more than the rest. Often the most critical filter: too high → hot motors and noise; too low → mushy D and lag that brings propwash back. Tune it first, alongside the RPM filter."
+ },
+ "dyn_notch": {
+  "fr": "Dynamic notch : filtres très étroits qui pistent en temps réel les pics de bruit (résonances) et les coupent sans toucher au reste du spectre. 'count' = combien de pics traqués, 'Q' = finesse (Q haut = encoche étroite, moins de retard), 'min/max' = plage surveillée. C'est l'outil principal contre les résonances.",
+  "en": "Dynamic notch: very narrow filters that track noise peaks (resonances) in real time and cut them without touching the rest of the spectrum. 'count' = how many peaks tracked, 'Q' = sharpness (high Q = narrow notch, less lag), 'min/max' = the watched range. The main tool against resonances."
+ },
+ "rpm_filter": {
+  "fr": "RPM filter : utilise la vitesse réelle des moteurs (télémétrie ESC/DShot) pour placer des encoches pile sur les harmoniques de rotation des hélices. Le filtre le plus efficace contre le bruit moteur : bien réglé, il permet d'ouvrir les autres filtres (gyro/D-term plus hauts) et donc de gagner en réactivité.",
+  "en": "RPM filter: uses real motor speed (ESC/DShot telemetry) to place notches exactly on the props' rotation harmonics. The most effective filter against motor noise: when set right it lets you open the other filters (higher gyro/D-term) and so gain responsiveness."
+ },
+ "dmax": {
+  "fr": "D_max : valeur haute du terme D, atteinte seulement lors de mouvements brusques. Au repos le D reste à sa valeur basse (D_min, le D des PID) pour limiter le bruit ; il monte vers D_max sur les à-coups pour amortir. Si D_min = D_max, le D est fixe (pas de boost).",
+  "en": "D_max: the high value of the D term, reached only on sharp moves. At rest D stays at its low value (D_min, the PID's D) to limit noise; it rises toward D_max on stick jabs to damp. If D_min = D_max, D is fixed (no boost)."
+ },
+ "pid": {
+  "fr": "PID (P, I, D) : le cœur de la stabilisation. P = réactivité immédiate à l'erreur (trop haut = oscillation rapide) ; I = tient la consigne dans la durée et contre le vent (trop haut = rebond lent) ; D = amortit/anticipe (trop haut = bruit et chaleur). On les règle APRÈS le filtrage, car les filtres changent la marge de phase disponible.",
+  "en": "PID (P, I, D): the heart of stabilisation. P = immediate reaction to error (too high = fast oscillation); I = holds the setpoint over time and against wind (too high = slow bounce); D = damps/anticipates (too high = noise and heat). Tune them AFTER filtering, because filters change the available phase margin."
+ },
+ "throttle_map": {
+  "fr": "Carte throttle × fréquence : spectre du gyro découpé par tranches de gaz. Les résonances moteur migrent avec le régime — une raie qui se décale en montant le gaz est d'origine moteur (RPM filter / dyn notch), une raie fixe est une résonance de cadre (notch statique).",
+  "en": "Throttle × frequency map: the gyro spectrum sliced by throttle. Motor resonances migrate with rpm — a line that shifts as throttle rises is motor-borne (RPM filter / dyn notch), a fixed line is a frame resonance (static notch)."
+ },
+ "motor_harmonics": {
+  "fr": "Harmoniques moteur : le bruit moteur se loge aux multiples de la fréquence de rotation des hélices, déduite de l'eRPM (rotation Hz = eRPM×100 / (pôles/2) / 60). Comme les 4 moteurs tournent à des régimes un peu différents et que le gaz varie, chaque harmonique (1×, 2×, 3×…) est une bande, pas une raie. Un pic de bruit DANS une bande = bruit moteur (du ressort du RPM filter / dyn_notch) ; un pic HORS bande = résonance de cadre/pale (notch statique).",
+  "en": "Motor harmonics: motor noise sits at multiples of the prop rotation frequency, derived from eRPM (rotation Hz = eRPM×100 / (poles/2) / 60). Since the 4 motors run at slightly different rpm and throttle varies, each harmonic (1×, 2×, 3×…) is a band, not a line. A noise peak INSIDE a band = motor noise (RPM filter / dyn_notch territory); a peak OUTSIDE = a frame/prop resonance (static notch)."
+ },
+ "spectrogram": {
+  "fr": "Spectrogramme : une carte temps × fréquence de l'énergie du gyro pendant le chirp. Le balayage du chirp apparaît comme une diagonale qui monte en fréquence ; une résonance apparaît comme une bande horizontale qui s'allume quand le sweep passe à sa fréquence. Sert à vérifier que le chirp a bien balayé toute la bande et à repérer visuellement les résonances et leur étalement.",
+  "en": "Spectrogram: a time × frequency map of the gyro energy during the chirp. The chirp sweep shows up as a diagonal rising in frequency; a resonance shows up as a horizontal band that lights up when the sweep reaches its frequency. Use it to check the chirp actually swept the whole band and to spot resonances and their spread visually."
+ },
+ "step_response": {
+  "fr": "Réponse indicielle : la réaction de l'axe à un échelon de consigne, reconstruite depuis la même mesure que le Bode. C'est le pendant temporel : on y lit l'overshoot (dépassement %), le temps de montée et l'établissement. Un fort overshoot ≙ une marge de phase faible sur le Bode ; les deux courbes racontent la même histoire.",
+  "en": "Step response: the axis' reaction to a step in setpoint, reconstructed from the same measurement as the Bode. It is the time-domain companion: read off overshoot (%), rise time and settling. A large overshoot ≙ a low phase margin on the Bode; both curves tell the same story."
+ },
+ "noise_psd": {
+  "fr": "Spectre de bruit (PSD, dB) : densité de puissance du gyro vs fréquence, mesurée hors chirp. Référence = le plancher de bruit (la base plate en haute fréquence, stable d'un vol à l'autre), donc 0 dB = plancher et un pic se lit par sa hauteur AU-DESSUS du plancher. Les deux grandeurs fiables (indépendantes de la référence) : l'atténuation brut→filtré (ce que les filtres enlèvent) et le résiduel filtré au-dessus du plancher (ce qui reste). Pas de seuil absolu type « −10 dB » : c'est arbitraire et dépendant du vol ; les vrais juges sont la marge de phase et la température moteur.",
+  "en": "Noise spectrum (PSD, dB): gyro power density vs frequency, measured outside the chirp. Reference = the noise floor (the flat HF baseline, stable across flights), so 0 dB = floor and a peak is read by its height ABOVE the floor. The two reliable (reference-independent) quantities: the raw→filtered attenuation (what the filters remove) and the filtered residual above the floor (what remains). No absolute '−10 dB' threshold: it is arbitrary and flight-dependent; the real judges are phase margin and motor temperature."
+ },
+ "propwash": {
+  "fr": "Propwash : les oscillations/secousses quand le drone retombe dans ses propres turbulences (descentes rapides, sorties de virage). Souvent lié à un D mou ou trop filtré, ou à une marge de phase faible : la boucle n'amortit pas assez vite.",
+  "en": "Propwash: the wobble/shaking when the drone falls back into its own turbulence (fast descents, corner exits). Often tied to a mushy or over-filtered D, or a low phase margin: the loop does not damp fast enough."
+ }
+}
