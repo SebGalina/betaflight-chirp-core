@@ -15,30 +15,40 @@ Written **once**, consumed as a thin shell everywhere:
 ## Install
 
 ```bash
-pip install "betaflight-chirp-core @ git+https://github.com/SebGalina/betaflight-chirp-core@v0.1.0"
+pip install "betaflight-chirp-core @ git+https://github.com/SebGalina/betaflight-chirp-core@v0.1.4"
 ```
 
 ## Usage
 
 ```python
-from betaflight_chirp_core import decode
+from betaflight_chirp_core import decode, analyse_log, build_report, run
 
+# low-level: decode -> analyse -> render, step by step
 df, fs, config = decode(open("log.bbl", "rb").read())
 # df: decoded frames (pandas)   fs: loop/log rate (Hz)   config: PID/filter settings
+a_pass = analyse_log(df, fs, config)        # one log  -> one self-contained pass dict
+html   = build_report([a_pass])             # passes   -> self-contained HTML report
+
+# single call: decode + analyse + report in one shot (used by mcp_local + worker)
+result = run(open("log.bbl", "rb").read())
+result.metrics       # per-axis indicators the web front renders as-is
+result.report_html   # the self-contained HTML report (LLM path returns its link)
 ```
 
-Coming next (phase 3): `analyse_log(df, fs, config, **params)`,
-`build_report(passes)`, and the single-call `run(bbl_bytes)`.
+Importing the package is **light**: numpy/scipy/pandas load lazily, only when an
+analysis runs. `from betaflight_chirp_core import decoder` stays stdlib-only, so
+decode-only callers pull no heavy deps.
 
 ## Layout
 
 | Module | Role |
 |---|---|
-| `decoder.py` | pure-Python `.bbl` frame decoder (stdlib only) |
-| `signal.py`  | `decode_dataframe` (bytes → frames), `sample_rate`, `active_mask` |
-| `config.py`  | PID / filter settings parsed from the header |
-| `analysis/`  | chirp (FRF/Bode), spectral, step response *(phase 3)* |
-| `report.py`  | self-contained HTML report *(phase 3)* |
+| `decoder.py`      | pure-Python `.bbl` frame decoder (stdlib only) |
+| `signal.py`       | `decode_dataframe` (bytes → frames), `sample_rate`, `active_mask` |
+| `config.py`       | PID / filter settings parsed from the header |
+| `analysis/`       | chirp (FRF/Bode), spectral, step response |
+| `report.py`       | self-contained HTML report (inlines the renderer assets) |
+| `report_assets/`  | shared report renderer (`chirp_report.{js,css}` + glossary/strings JSON) — inlined by `report.py`, vendored by the FPVLogForge front |
 
 ## Develop
 
