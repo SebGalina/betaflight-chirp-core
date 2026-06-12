@@ -1,5 +1,9 @@
 # betaflight-chirp-core
 
+[![PyPI](https://img.shields.io/pypi/v/betaflight-chirp-core)](https://pypi.org/project/betaflight-chirp-core/)
+[![Python](https://img.shields.io/pypi/pyversions/betaflight-chirp-core)](https://pypi.org/project/betaflight-chirp-core/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 The compute core for Betaflight closed-loop **chirp** / blackbox analysis:
 decode a `.bbl`/`.bfl`, estimate the frequency response (FRF/Bode), step
 response and noise spectrum, and render a self-contained HTML report.
@@ -15,7 +19,13 @@ Written **once**, consumed as a thin shell everywhere:
 ## Install
 
 ```bash
-pip install "betaflight-chirp-core @ git+https://github.com/SebGalina/betaflight-chirp-core@v0.1.4"
+pip install betaflight-chirp-core
+```
+
+Or pin an exact commit straight from git:
+
+```bash
+pip install "betaflight-chirp-core @ git+https://github.com/SebGalina/betaflight-chirp-core@v0.1.5"
 ```
 
 ## Usage

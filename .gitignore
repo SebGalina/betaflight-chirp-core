@@ -12,3 +12,5 @@ dist/
 *.bfl
 tests/data/*
 !tests/data/.gitkeep
+# exception: 8.bbl is a verified GPS-free CI fixture (no GPS frame, no home-point)
+!tests/data/8.bbl
