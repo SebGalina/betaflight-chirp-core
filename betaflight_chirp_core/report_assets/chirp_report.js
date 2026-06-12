@@ -1,6 +1,6 @@
-// Mountable Chirp report renderer. SINGLE SOURCE shared by the Betaflight skill
-// (inlined into its self-contained HTML by report.py, classic <script>) and the
-// FPVLogForge front (imported for side-effect, then window.mountChirpReport()).
+// Mountable Chirp report renderer. SINGLE SOURCE shared by the self-contained
+// HTML report (inlined by report.py, classic <script>) and any web front
+// (imported for side-effect, then window.mountChirpReport()).
 // Defined as a global-exposing IIFE so it loads in BOTH a classic script and an
 // ES module bundle. Entry: mountChirpReport(host, R, opts) — `R` is the assembled
 // report dict (passes + _glossary + _strings); opts.fileName labels the banner.

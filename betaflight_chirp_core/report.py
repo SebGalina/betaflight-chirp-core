@@ -426,8 +426,8 @@ def _asset(name: str) -> str:
 def _html_report(report: dict, file_name: str) -> str:
     """Render the assembled report dict into a self-contained HTML page by inlining
     the shared, mountable renderer (report_assets/chirp_report.{css,js}) — the SAME
-    asset the FPVLogForge front imports, so the skill report and the front render
-    from ONE source. The renderer is a global-exposing IIFE: we inline it in a
+    asset a web front can import, so the standalone report and a mounted front
+    render from ONE source. The renderer is a global-exposing IIFE: we inline it in a
     classic <script>, then call mountChirpReport() into a host div."""
     css = _asset("chirp_report.css")
     js = _asset("chirp_report.js")

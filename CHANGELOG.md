@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Extracted the HTML report renderer into shared, mountable assets
   (`report_assets/{chirp_report.js,chirp_report.css,glossary.json,strings.json}`),
-  inlined by `report.py` and vendored by the FPVLogForge front.
+  inlined by `report.py` and mountable by a web front.
 
 ## [0.1.3] - 2026-06-08
 

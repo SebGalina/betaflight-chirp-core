@@ -8,11 +8,6 @@ The compute core for Betaflight closed-loop **chirp** / blackbox analysis:
 decode a `.bbl`/`.bfl`, estimate the frequency response (FRF/Bode), step
 response and noise spectrum, and render a self-contained HTML report.
 
-Written **once**, consumed as a thin shell everywhere:
-
-- the **Betaflight skill** (public) vendors this package into its zip;
-- the **FPVLogForge** Oracle worker (private) imports it as a pip dependency.
-
 > `betaflight-chirp-core` knows nothing about MCP, HTTP, Docker, the CLI or the
 > filesystem. **Input: bytes. Output: objects + HTML.**
 
@@ -58,7 +53,7 @@ decode-only callers pull no heavy deps.
 | `config.py`       | PID / filter settings parsed from the header |
 | `analysis/`       | chirp (FRF/Bode), spectral, step response |
 | `report.py`       | self-contained HTML report (inlines the renderer assets) |
-| `report_assets/`  | shared report renderer (`chirp_report.{js,css}` + glossary/strings JSON) — inlined by `report.py`, vendored by the FPVLogForge front |
+| `report_assets/`  | shared report renderer (`chirp_report.{js,css}` + glossary/strings JSON) — inlined by `report.py`, mountable by a web front |
 
 ## Develop
 

@@ -1,7 +1,7 @@
 """betaflight-chirp-core — Betaflight blackbox / chirp analysis core.
 
-Single source of truth for the compute layer shared by the Betaflight skill
-(vendored into its zip) and the FPVLogForge Oracle worker (pip dependency).
+Single source of truth for the compute layer: vendor it into a tool's bundle
+or import it as a pip dependency from any front-end.
 
 Entry: **bytes in, objects out.** No filesystem, no subprocess, no CLI, no MCP.
 
@@ -69,7 +69,7 @@ def build_report(passes, lang: str = "fr") -> str:
 
 
 def run(bbl_bytes: bytes, params: dict | None = None) -> AnalysisResult:
-    """Full single-pass pipeline used by mcp_local and the Oracle worker."""
+    """Full single-pass pipeline: decode + analyse + render, in one call."""
     params = dict(params or {})
     session = params.pop("session", None)
     df, fs, cfg = decode(bbl_bytes, session)
