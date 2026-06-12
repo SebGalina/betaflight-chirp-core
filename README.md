@@ -34,15 +34,79 @@ df, fs, config = decode(open("log.bbl", "rb").read())
 a_pass = analyse_log(df, fs, config)        # one log  -> one self-contained pass dict
 html   = build_report([a_pass])             # passes   -> self-contained HTML report
 
-# single call: decode + analyse + report in one shot (used by mcp_local + worker)
+# single call: decode + analyse + report in one shot
 result = run(open("log.bbl", "rb").read())
-result.metrics       # per-axis indicators the web front renders as-is
-result.report_html   # the self-contained HTML report (LLM path returns its link)
+result.metrics       # == result.raw["axes"] — per-axis indicators, render as-is
+result.report_html   # the self-contained HTML report (a full <html> string)
+result.raw           # the complete pass dict (see Output below)
 ```
 
 Importing the package is **light**: numpy/scipy/pandas load lazily, only when an
 analysis runs. `from betaflight_chirp_core import decoder` stays stdlib-only, so
 decode-only callers pull no heavy deps.
+
+## Output
+
+Four return surfaces, from raw to ready-to-render:
+
+| Call | Returns | Is |
+|---|---|---|
+| `decode(bytes)`        | `(df, fs, config)`           | pandas frames, log rate (Hz), header tune dict |
+| `analyse_log(df,…)`    | **pass dict**                | one log → all indicators (below) |
+| `build_report(passes)` | `str`                        | one self-contained `<html>` page |
+| `run(bytes)`           | `AnalysisResult`             | `.metrics` (= `raw["axes"]`), `.report_html`, `.raw` (pass dict) |
+
+### The pass dict
+
+`analyse_log()` / `result.raw` — one self-contained analysis of one log:
+
+```python
+{
+  "timestamp":   "2026-06-12T09:00:00",   # ISO, when analysed
+  "file":        "log.bbl",
+  "sample_rate_hz": 8000,                  # loop/log rate
+  "input_col":   "debug[3]",               # FRF input column (chirp setpoint channel)
+  "band_hz":     [1.0, 1000.0],            # analysed frequency band [fmin, fmax]
+  "throttle_max": 1850,                    # peak flying throttle (or None)
+  "config":      {…},                      # PID / filter settings parsed from the header
+  "axes":        {"roll": {…}, "pitch": {…}, "yaw": {…}},   # per-axis, see below
+  "tune_score":  {"overall": 76.0, "grade": "B", "axes": {"roll": {"score": …, "subs": {…}}}},
+  "throttle_map":   {…},                   # resonance vs throttle (heatmap payload)
+  "noise_spectrum": {…},                   # gyro PSD raw vs filtered (see below)
+  "spectrogram":    {…},                   # chirp sweep time×freq (heatmap payload)
+  "synthesis":      [{"fr": "...", "en": "..."}, …],   # plain-language read, bilingual
+  "filter_suggestions": [ … ],             # filter change hints (only when config present)
+  "noise_suggestions":  [ … ],             # noise/peak hints
+}
+```
+
+**Per axis** (`axes["roll"]` etc.) — the Bode + step + verdict for one axis:
+
+```python
+{
+  "band_hz": [1.0, 1000.0], "n_samples": 48000,
+  "freq": [...], "gain_db": [...], "phase_deg": [...], "coherence": [...],  # Bode curves
+  "peaks": [ … ],                          # gain-resonance peaks in band
+  "crossover_hz": 32.0,                    # 0 dB crossover
+  "phase_margin_deg": 41.0, "phase_margin_unc_deg": 6.0,
+  "ms": 4.8, "f_ms_hz": 70.0, "pm_guaranteed_deg": 34.0,   # peak sensitivity (robustness)
+  "step": {                                # setpoint→gyro step response
+    "t_ms": [...], "y": [...], "y_lo": [...], "y_hi": [...],
+    "metrics": {"overshoot_pct": 12.0, "rise_ms": 18.0, "delay_ms": 3.0,
+                "settle_ms": 60.0, "peak": 1.12},
+  },
+  "diagnosis": [ … ], "step_diagnosis": [ … ],   # short verdict strings
+}
+```
+
+`tune_score.grade` is an **A–F** letter (`A` ≥ 85 … `F` < 40); `overall` is the mean
+of the per-axis scores. `noise_spectrum` carries `freqs`, `raw_db`/`filt_db` curves
+(0 dB = raw broadband floor) and a `peaks` list with `above_floor_db` / `resid_db`
+(filtered residual) / `atten_db` (raw→filtered cut) per peak.
+
+> Array fields (`freq`, `gain_db`, `*_db`, …) are JSON-ready (rounded floats), so the
+> whole pass dict serialises straight to a front-end or a history store. For the exact
+> nested fields, read `analysis/chirp.py:build_pass`.
 
 ## Layout
 
@@ -62,9 +126,11 @@ pip install -e ".[test]"
 pytest
 ```
 
-Tests look for `.bbl` fixtures in `tests/data/` (git-ignored — **never commit a
-real flight log**, it carries GPS home-point coordinates). Drop your own logs
-there to run the decode tests.
+Tests run on `.bbl` fixtures in `tests/data/`. One GPS-free log (`8.bbl`) ships so
+the suite runs out of the box; drop your own logs there for more coverage. Every
+other `.bbl`/`.bfl` is git-ignored — **never commit a real flight log**, it
+carries GPS home-point coordinates (only `8.bbl` is whitelisted, after verifying
+it has no GPS frame).
 
 ## License
 
