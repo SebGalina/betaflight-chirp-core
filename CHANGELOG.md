@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-06-15
+
+### Added
+- Renderer: interactive legend → plot highlighting. Hovering a filter entry in the
+  Bode-gain, phase, coherence or noise-PSD legend emphasises that item on the plot
+  via a stacked transparent overlay (`mkCanvasHL`/`emphV`/`emphBand`/`bindHL`): LPF
+  cut-off lines, the dyn_notch min–max band, and motor-harmonic bands. `bindHL` can
+  drive several overlays at once, so shared markers echo across plots — f(Ms) on
+  both gain and phase, the untrusted (coherence < gate) band on coherence + gain +
+  phase. The base plot is never redrawn, so the highlight is cheap and clears on
+  mouse-out.
+- Renderer: the coherence reliability note became an interactive “untrusted zone”
+  legend entry — hover shows its tooltip and highlights the grey band on all three
+  Bode plots.
+- Renderer: hovering the gyro noise-PSD curve shows a zoom tooltip of the nearest
+  local peak with its immediate neighbourhood (linear-frequency mini-plot, raw vs
+  filtered). The peak freq/height labels were moved off the busy full-band plot
+  (yellow dots kept) into this zoom.
+- Renderer: hovering the f(Ms) line on the Bode plot shows a zoom of the gain |T|
+  and the sensitivity |S| = |1 − T| (computed from gain + phase) with the Ms peak
+  marked; on the phase plot, a ±10 Hz zoom of the measured margin (phase vs the
+  −180° line at f(Ms), interval shaded). Both carry a local ordinate scale.
+
+### Changed
+- Renderer: clicking a pass pill (show/hide) now preserves the scroll position
+  instead of jumping back to the top of the report.
+- Renderer (`report_assets/chirp_report.js`): the source `.bbl` file name now
+  surfaces in multi-pass identification. File names are reduced to their basename
+  (`baseName`) everywhere they appear — the rich pass tooltip (`cfgHTML`), the
+  settings-comparison column header (shown under `P{n}`), and the config tooltip.
+  The pass pills and comparison header use the single rich `cfgHTML` tooltip
+  (config + file); the redundant native `title` is dropped so only one tooltip
+  shows. No `p.file` → identical to before; mono-pass unchanged. Renderer signature,
+  IIFE/global export and dual classic-script/ES-module loading untouched.
+- `report.py` `_assemble_report`: each assembled pass' `file` is normalised to its
+  bare basename so the skill and standalone report always have a clean name to show.
+
 ## [0.1.6] - 2026-06-12
 
 ### Documentation
@@ -57,7 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release: package scaffold, `.bbl` decoder, `signal`/`config`,
   chirp FRF/Bode analysis, and the self-contained HTML report.
 
-[Unreleased]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.3...v0.1.4

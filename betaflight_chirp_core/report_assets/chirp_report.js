@@ -41,7 +41,7 @@ function T(k) { const s=STR[LANG]||STR.fr||{}; return (k in s)? s[k] : k; }
 function tip(k,label) { const g=GL[k]||{}; const t=(g[LANG]||g.fr||'').replace(/"/g,'&quot;');
   return '<span class="term" data-tip="'+t+'">'+(label||k)+'</span>'; }
 function loc(o) { return o ? (o[LANG]||o.fr||o.en||'') : ''; }
-function passLabel(p) { return T('pass_word')+' '+p.n+' — '+p.ts+(p.file?(' ('+p.file+')'):''); }
+function baseName(f) { return f ? String(f).split(/[\\/]/).pop() : ''; }   // strip any path -> bare file name
 function cfgFields(cfg) {
   if (!cfg) return [];
   const o=[];
@@ -265,6 +265,36 @@ function filterOverlay(ctx,h,fmin,fmax,fms) {
   if (CFG.dterm_lpf1 && CFG.dterm_lpf1.dyn) { vline(ctx,h,CFG.dterm_lpf1.dyn[0],fmin,fmax,'#d48fd4','dtermLPF'); vline(ctx,h,CFG.dterm_lpf1.dyn[1],fmin,fmax,'#d48fd4',''); }
   vline(ctx,h,fms,fmin,fmax,'#ffab40','f(Ms)');
 }
+// --- Interactive legend highlight: a transparent canvas stacked over a plot, drawn on legend
+// hover (emphasise a filter cut-off line / a band's min–max) and cleared on mouse-out. The base
+// plot is never redrawn — the overlay just adds the emphasis on top, so it is cheap and reversible. ---
+function mkCanvasHL(parent,h){
+  const wrap=el('div'); wrap.style.cssText='position:relative;line-height:0;margin:6px 0'; parent.appendChild(wrap);
+  const c=mkCanvas(wrap,h); c.style.margin='0';   // margin lives on the wrap so the overlay aligns at top:0
+  const o=document.createElement('canvas'); o.width=W; o.height=h;
+  // override the .chirp-report canvas rule (opaque bg + margin) — overlay must be transparent and
+  // pixel-aligned on the base canvas, else it hides the plot underneath.
+  o.style.cssText='position:absolute;left:0;top:0;margin:0;background:transparent;border-radius:0;pointer-events:none';
+  wrap.appendChild(o);
+  return {ctx:c.getContext('2d'), ov:o.getContext('2d'), canvas:c, h:h};
+}
+function emphV(o,h,f,fmin,fmax,col,lab){ if(!f||f<fmin||f>fmax)return; const x=logx(f,fmin,fmax);
+  o.save(); o.strokeStyle=col; o.lineWidth=3; o.shadowColor=col; o.shadowBlur=8;
+  o.beginPath(); o.moveTo(x,6); o.lineTo(x,h-20); o.stroke(); o.shadowBlur=0;
+  if(lab){ o.fillStyle=col; o.font='10px sans-serif'; o.fillText(lab,x+3,h-24); } o.restore(); }
+function emphBand(o,h,f0,f1,fmin,fmax,col){ if(!f0||!f1)return;
+  const a=logx(Math.max(f0,fmin),fmin,fmax), b=logx(Math.min(f1,fmax),fmin,fmax); if(b<=a)return;
+  o.save(); o.fillStyle=col; o.globalAlpha=0.28; o.fillRect(a,8,b-a,h-30); o.globalAlpha=1;
+  o.strokeStyle=col; o.lineWidth=2; o.setLineDash([4,3]); o.strokeRect(a,8,b-a,h-30); o.setLineDash([]); o.restore(); }
+// Bind legend entries carrying data-hl to one or more plot overlays: hover -> clear those overlays
+// then draw(name), leave -> clear. `overlays` = [{ov,h},...] (so a shared marker like f(Ms) can be
+// echoed on the gain AND phase plots at once); `draw` emphasises by the entry's data-hl name.
+function bindHL(container, overlays, draw){
+  const clearAll=()=>overlays.forEach(o=>o.ov.clearRect(0,0,W,o.h));
+  container.querySelectorAll('[data-hl]').forEach(sp=>{ sp.style.cursor='help';
+    sp.addEventListener('mouseenter',()=>{ clearAll(); draw(sp.dataset.hl); });
+    sp.addEventListener('mouseleave',clearAll); });
+}
 // Frequency where coherence drops below the gate for good (the trusted-band edge): scan for the
 // first point past which it stays under GATE for a small window, so a single dip doesn't trip it.
 function trustEdge(F,coh) {
@@ -306,7 +336,7 @@ function citem(lbl) {
 function cfgHTML(p) {
   const fields=cfgFields(p.config||{});
   let s='<b style="color:#cfe3ff">'+(LANG==='fr'?'Passe ':'Pass ')+p.n+'</b>'
-    +(p.file?' <span style="color:#8893a5">'+p.file+'</span>':'');
+    +(p.file?' <span style="color:#8893a5">'+baseName(p.file)+'</span>':'');
   if (!fields.length) return s+'<div style="color:#8893a5">'+(LANG==='fr'?'(config non lue dans ce log)':'(no config parsed)')+'</div>';
   const idx=PASSES.indexOf(p);
   const prev=(idx>0)?Object.fromEntries(cfgFields(PASSES[idx-1].config||{})):null;
@@ -359,9 +389,10 @@ function passPills() {
     const off=HIDDEN.has(i), col=PAL[i%PAL.length];
     const b=document.createElement('button');
     b.className='pillbtn passtip'+(off?' off':''); b.textContent='P'+p.n;
-    b.dataset.pass=i;
+    b.dataset.pass=i;   // .passtip + data-pass -> rich cfgHTML tooltip (config + file) via onMove
     b.style.borderColor=col; b.style.color=off?'#6b7689':col;
-    b.onclick=()=>{ off?HIDDEN.delete(i):HIDDEN.add(i); render(); };
+    // preserve scroll: render() rebuilds the whole root, which would otherwise jump back to the top
+    b.onclick=()=>{ off?HIDDEN.delete(i):HIDDEN.add(i); const y=window.scrollY; render(); window.scrollTo(0,y); };
     wrap.appendChild(b);
   });
   return wrap;
@@ -488,7 +519,9 @@ function render() {
       const box=el('div','axis step cmp'); root.appendChild(box);
       box.appendChild(el('h2',null,'<span class=sicon>🔀</span>'+T('cmp_h')));
       let changedAny=false, t='<table class=cmp><tr><th></th>';
-      PASSES.forEach((p,i)=>{ t+='<th><span class=swatch style="background:'+PAL[i%PAL.length]+'"></span><span class="passtip" data-pass="'+i+'">'+T('pass_word')+' '+p.n+'</span></th>'; });
+      PASSES.forEach((p,i)=>{ const fn=baseName(p.file);
+        t+='<th><span class=swatch style="background:'+PAL[i%PAL.length]+'"></span><span class="passtip" data-pass="'+i+'">'+T('pass_word')+' '+p.n+'</span>'
+          +(fn?'<div class=cmpfile style="color:#8893a5;font-weight:400">'+fn+'</div>':'')+'</th>'; });
       t+='</tr>';
       for (const [lbl] of ref) {
         const ci=citem(lbl);
@@ -589,7 +622,7 @@ function render() {
       // low-freq motion bump doesn't squash the plot.
       const sorted=ns.raw_db.slice().sort((a,b)=>a-b); const hiR=sorted[Math.floor(sorted.length*0.97)];
       let lo=Math.max(-25,Math.min(-6,...ns.filt_db)), hi=Math.max(12,Math.ceil(hiR/5)*5+3);
-      const H3=180, nc=mkCanvas(box,H3).getContext('2d');
+      const H3=180, NC=mkCanvasHL(box,H3), nc=NC.ctx;
       drawAxes(nc,H3,fmin,fmax,lo,hi,'dB/plancher');
       if (CFG.dyn_notch) vband(nc,H3,CFG.dyn_notch.min,CFG.dyn_notch.max,fmin,fmax,'rgba(255,212,121,0.07)');
       nc.font='10px sans-serif';
@@ -612,20 +645,65 @@ function render() {
       const ones=F.map(_=>1);
       if (ns.has_unfilt) plotLine(nc,H3,F,ns.filt_db,ones,fmin,fmax,lo,hi,'#80cbc4',{lw:1.6});
       plotLine(nc,H3,F,ns.raw_db,ones,fmin,fmax,lo,hi,'#4fc3f7',{lw:1.8});
-      nc.font='10px sans-serif'; let _lab=0;
+      // yellow dots only — the freq/height labels are dropped from the busy overview and shown
+      // instead in the per-peak hover zoom below (less clutter on the full-band plot).
       for (const pk of (ns.peaks||[])) { if (pk.freq_hz<fmin||pk.freq_hz>fmax) continue;
         const x=logx(pk.freq_hz,fmin,fmax), y=lerp(pk.above_floor_db,lo,hi,H3-22,8);
-        nc.fillStyle='#ffd479'; nc.beginPath(); nc.arc(x,y,2.6,0,7); nc.fill();
-        if (pk.above_floor_db >= RESID_OK) { const dy=(_lab++ %2)?12:-3;  // stagger to avoid overlap
-          nc.fillText(pk.freq_hz.toFixed(0)+'Hz +'+pk.above_floor_db.toFixed(0)+'dB', x+4, y+dy); } }
-      box.appendChild(el('div','legend',
+        nc.fillStyle='#ffd479'; nc.beginPath(); nc.arc(x,y,2.6,0,7); nc.fill(); }
+      const nleg=el('div','legend',
         (ns.has_unfilt?('<span style="color:#4fc3f7">— '+T('leg_raw')+'</span><span style="color:#80cbc4">— '+T('leg_filt')+'</span>'):'<span style="color:#4fc3f7">— gyro</span>')+
         '<span style="color:#7e8aa0">-- '+T('leg_floor')+'</span>'+
         '<span style="color:#ff8a80">-- '+T('leg_resid')+'</span>'+
-        '<span style="color:#5a9bd4">| '+tip('gyro_lpf','coupures gyro LPF')+'</span>'+
-        '<span style="color:#d48fd4">| '+tip('dterm_lpf','coupures D-term LPF')+'</span>'+
-        '<span style="color:#ffd479">▮ '+tip('dyn_notch','dyn_notch')+'</span>'+
-        (ns.motor?'<span style="color:#ff9a6a">▮ '+tip('motor_harmonics',T('leg_motor'))+'</span>':'')));
+        '<span data-hl="gyro" style="color:#5a9bd4">| '+tip('gyro_lpf','coupures gyro LPF')+'</span>'+
+        '<span data-hl="dterm" style="color:#d48fd4">| '+tip('dterm_lpf','coupures D-term LPF')+'</span>'+
+        '<span data-hl="notch" style="color:#ffd479">▮ '+tip('dyn_notch','dyn_notch')+'</span>'+
+        (ns.motor?'<span data-hl="motor" style="color:#ff9a6a">▮ '+tip('motor_harmonics',T('leg_motor'))+'</span>':''));
+      box.appendChild(nleg);
+      // legend hover -> emphasise on the PSD plot: LPF cut-off lines, dyn_notch min–max, motor-harmonic bands
+      bindHL(nleg,[{ov:NC.ov,h:H3}], name=>{
+        if(name==='gyro'){ if(CFG.gyro_lpf1&&CFG.gyro_lpf1.dyn){ emphV(NC.ov,H3,CFG.gyro_lpf1.dyn[0],fmin,fmax,'#5a9bd4'); emphV(NC.ov,H3,CFG.gyro_lpf1.dyn[1],fmin,fmax,'#5a9bd4','gLPF1'); } if(CFG.gyro_lpf2) emphV(NC.ov,H3,CFG.gyro_lpf2.static,fmin,fmax,'#79c0ff','gLPF2'); }
+        else if(name==='dterm'){ if(CFG.dterm_lpf1&&CFG.dterm_lpf1.dyn) emphV(NC.ov,H3,CFG.dterm_lpf1.dyn[1],fmin,fmax,'#d48fd4','dLPF1'); if(CFG.dterm_lpf2) emphV(NC.ov,H3,CFG.dterm_lpf2.static,fmin,fmax,'#d48fd4','dLPF2'); }
+        else if(name==='notch'){ if(CFG.dyn_notch){ emphBand(NC.ov,H3,CFG.dyn_notch.min,CFG.dyn_notch.max,fmin,fmax,'#ffd479'); emphV(NC.ov,H3,CFG.dyn_notch.min,fmin,fmax,'#ffd479','min'); emphV(NC.ov,H3,CFG.dyn_notch.max,fmin,fmax,'#ffd479','max'); } }
+        else if(name==='motor'){ if(ns.motor&&ns.motor.bands) for(const b of ns.motor.bands) emphBand(NC.ov,H3,b.lo,b.hi,fmin,fmax,'#ff8a50'); }
+      });
+      // hover the PSD curve -> a zoom of the nearest local peak (linear freq, immediate neighbourhood) in the tooltip
+      NC.canvas.classList.add('noisezoom');
+      NC.canvas.onmousemove=e=>{
+        const r=NC.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
+        const t=(mx-PAD)/((W-12)-PAD); const f=Math.pow(10, lerp(t,0,1,Math.log10(fmin),Math.log10(fmax)));
+        if(f<fmin||f>fmax){ htipEl.style.display='none'; return; }
+        let ci=0,bd=1e9; for(let i=0;i<F.length;i++){ const dd=Math.abs(F[i]-f); if(dd<bd){bd=dd;ci=i;} }
+        let pk=ci; for(let i=Math.max(0,ci-5);i<=Math.min(F.length-1,ci+5);i++) if(ns.raw_db[i]>ns.raw_db[pk]) pk=i;
+        const wlo=Math.max(0,pk-14), whi=Math.min(F.length-1,pk+14), fL=F[wlo], fH=F[whi];
+        const zw=240, zh=130, zc=document.createElement('canvas'); zc.width=zw; zc.height=zh;
+        const z=zc.getContext('2d'); z.font='9px sans-serif';
+        let yl=1e9,yh=-1e9; for(let i=wlo;i<=whi;i++){ yl=Math.min(yl,ns.raw_db[i]); yh=Math.max(yh,ns.raw_db[i]); if(ns.has_unfilt){ yl=Math.min(yl,ns.filt_db[i]); yh=Math.max(yh,ns.filt_db[i]); } }
+        yh=Math.max(yh,RESID_OK+1); yl=Math.min(yl,-2); const yp_=(yh-yl)*0.1||1; yl-=yp_; yh+=yp_;
+        const Lz=30,Rz=8,Tz=14,Bz=14;
+        const xp=ff=>Lz+(ff-fL)/((fH-fL)||1)*(zw-Lz-Rz), yp=v=>(zh-Bz)-(v-yl)/((yh-yl)||1)*(zh-Bz-Tz);
+        z.fillStyle='#0d1016'; z.fillRect(0,0,zw,zh);
+        z.strokeStyle='#2a2f3a'; z.beginPath(); z.moveTo(Lz,yp(0)); z.lineTo(zw-Rz,yp(0)); z.stroke();
+        z.fillStyle='#7e8aa0'; z.fillText('0',2,yp(0)+3);
+        z.strokeStyle='rgba(255,138,128,0.5)'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(Lz,yp(RESID_OK)); z.lineTo(zw-Rz,yp(RESID_OK)); z.stroke(); z.setLineDash([]);
+        const line=(arr,col)=>{ z.strokeStyle=col; z.lineWidth=1.6; z.beginPath(); for(let i=wlo;i<=whi;i++){ const x=xp(F[i]),y=yp(arr[i]); i===wlo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke(); };
+        if(ns.has_unfilt) line(ns.filt_db,'#80cbc4');
+        line(ns.raw_db,'#4fc3f7');
+        z.fillStyle='#ffd479'; z.beginPath(); z.arc(xp(F[pk]),yp(ns.raw_db[pk]),3,0,7); z.fill();
+        z.fillStyle='#cfe3ff'; z.fillText(F[pk].toFixed(0)+' Hz · +'+ns.raw_db[pk].toFixed(0)+' dB', Lz, 9);
+        // detected peaks (ns.peaks) inside the window: yellow dot + the freq/height label moved here from the overview
+        let _zlab=0;
+        for(const p2 of (ns.peaks||[])){ if(p2.freq_hz<fL||p2.freq_hz>fH) continue;
+          const px=xp(p2.freq_hz), py=yp(p2.above_floor_db);
+          z.fillStyle='#ffd479'; z.beginPath(); z.arc(px,py,3,0,7); z.fill();
+          z.fillStyle='#ffe7a8'; z.fillText(p2.freq_hz.toFixed(0)+'Hz +'+p2.above_floor_db.toFixed(0)+'dB', Math.min(px+5, zw-72), Math.max(18, py+((_zlab++%2)?11:-4))); }
+        z.fillStyle='#8893a5'; z.fillText(fL.toFixed(0), Lz, zh-3); z.fillText(fH.toFixed(0)+' Hz', zw-Rz-34, zh-3);
+        htipEl.innerHTML=''; const cap=el('div',null,LANG==='fr'?'Zoom bruit — pic local':'Noise zoom — local peak');
+        cap.style.cssText='font:10px sans-serif;color:#9ecbff;margin-bottom:3px'; htipEl.appendChild(cap); htipEl.appendChild(zc);
+        htipEl.style.display='block';
+        htipEl.style.left=Math.min(e.clientX+14, window.innerWidth-zw-20)+'px';
+        htipEl.style.top=Math.min(e.clientY+14, window.innerHeight-zh-30)+'px';
+      };
+      NC.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
       box.appendChild(el('div','legend',(ns.has_unfilt?T('noise_cap'):T('noise_cap_nounfilt')).replace('{psd}',tip('noise_psd','PSD'))));
     }
 
@@ -668,11 +746,13 @@ function render() {
     const trustLbl = (LANG==='fr'?'zone non fiable':'untrusted zone');
 
     // 1) Coherence first — it defines where the rest can be trusted; the 0.8 gate edge carries down.
-    // The reliability note sits next to the title; the grey zone is labelled in-plot.
-    box.appendChild(el('h3',null,tip('coherence',LANG==='fr'?'Cohérence':'Coherence')
-      +' <span class="meta" style="text-transform:none;letter-spacing:0;font-weight:400">— '
-      +T('coh_cap').replace('{gate}',GATE.toFixed(1))+'</span>'));
-    let ch=mkCanvas(box,Hh-30).getContext('2d');
+    // The reliability note is now an interactive "untrusted zone" legend entry: hover it -> its tooltip
+    // (the coh_cap reliability note) + highlight of the grey untrusted band on the plot.
+    const cohH=el('h3',null,tip('coherence',LANG==='fr'?'Cohérence':'Coherence')
+      +' <span class="meta" style="text-transform:none;letter-spacing:0;font-weight:400;margin-left:8px">'
+      +'<span data-hl="trust" class="term" data-tip="'+T('coh_cap').replace('{gate}',GATE.toFixed(1)).replace(/"/g,'&quot;')+'" style="color:#8a93a5;cursor:help">▮ '+trustLbl+'</span></span>');
+    box.appendChild(cohH);
+    const CH=mkCanvasHL(box,Hh-30), ch=CH.ctx;
     drawAxes(ch,Hh-30,fmin,fmax,0,1,'coh');
     coherZone(ch,Hh-30,ftrust,fmin,fmax,trustLbl);
     hline(ch,Hh-30,GATE,0,1,'#7e8aa0',GATE.toFixed(1));
@@ -682,15 +762,15 @@ function render() {
     // 2) Gain — filter-overlay legend moved up next to the title (the grey untrusted zone is still
     //    echoed from coherence on the plot, but no longer needs its own legend entry).
     const bodeLeg='<span style="text-transform:none;letter-spacing:0;font-weight:400;font-size:11px;margin-left:12px">'
-      +'<span style="color:#5a9bd4;margin-right:12px">│ '+tip('gyro_lpf',T('leg_gyro'))+'</span>'
-      +'<span style="color:#d48fd4;margin-right:12px">│ '+tip('dterm_lpf',T('leg_dterm'))+'</span>'
-      +'<span style="color:#ffd479;margin-right:12px">▮ '+tip('dyn_notch',T('leg_notch'))+'</span>'
-      +'<span style="color:#ffab40">│ '+tip('sensitivity',T('leg_fms'))+'</span></span>';
-    box.appendChild(el('h3',null,tip('gain',T('bode_h'))+bodeLeg));
+      +'<span data-hl="gyro" style="color:#5a9bd4;margin-right:12px">│ '+tip('gyro_lpf',T('leg_gyro'))+'</span>'
+      +'<span data-hl="dterm" style="color:#d48fd4;margin-right:12px">│ '+tip('dterm_lpf',T('leg_dterm'))+'</span>'
+      +'<span data-hl="notch" style="color:#ffd479;margin-right:12px">▮ '+tip('dyn_notch',T('leg_notch'))+'</span>'
+      +'<span data-hl="fms" style="color:#ffab40">│ '+tip('sensitivity',T('leg_fms'))+'</span></span>';
+    const gainH=el('h3',null,tip('gain',T('bode_h'))+bodeLeg); box.appendChild(gainH);
     let gAll=[]; ser.forEach(o=>gAll=gAll.concat(o.p.gain_db));
     if (d.gain_band) gAll=gAll.concat(d.gain_band[0],d.gain_band[1]);
     let gmin=Math.min(-12,...gAll), gmax=Math.max(12,...gAll);
-    let g=mkCanvas(box,Hh).getContext('2d');
+    const G=mkCanvasHL(box,Hh), g=G.ctx;
     drawAxes(g,Hh,fmin,fmax,gmin,gmax,'gain dB');
     coherZone(g,Hh,ftrust,fmin,fmax,'');
     filterOverlay(g,Hh,fmin,fmax,fms);
@@ -700,13 +780,92 @@ function render() {
 
     // 3) Phase — same trusted-zone overlay.
     box.appendChild(el('h3',null,tip('phase',LANG==='fr'?'Phase':'Phase')));
-    let p=mkCanvas(box,Hh).getContext('2d');
+    const P=mkCanvasHL(box,Hh), p=P.ctx;
     drawAxes(p,Hh,fmin,fmax,-360,0,'phase °');
     coherZone(p,Hh,ftrust,fmin,fmax,'');
     hline(p,Hh,-180,-360,0,'#ff8a80','-180°');
     if (d.phase_band && !HIDDEN.has(PRIMARY)) plotBand(p,Hh,d.freq,d.phase_band[0].map(wrap),d.phase_band[1].map(wrap),fmin,fmax,-360,0,PCOL);
     for (const o of ser) plotLine(p,Hh,o.p.freq,o.p.phase_deg.map(wrap),o.p.coherence,fmin,fmax,-360,0,PAL[o.i%PAL.length],{dim:!o.primary, lw:o.primary?2.2:1.5});
     vline(p,Hh,fms,fmin,fmax,'#ffab40','f(Ms)');
+
+    // gain-legend hover -> emphasise the filter. f(Ms) is a shared marker: echo it on BOTH gain and
+    // phase (the vertical line is aligned across the two plots), the rest only on the gain plot.
+    bindHL(gainH,[{ov:G.ov,h:Hh},{ov:P.ov,h:Hh}], name=>{
+      if(name==='gyro'){ const c=CFG.gyro_lpf1&&CFG.gyro_lpf1.dyn; if(c){ emphV(G.ov,Hh,c[0],fmin,fmax,'#5a9bd4'); emphV(G.ov,Hh,c[1],fmin,fmax,'#5a9bd4','gyro LPF'); } }
+      else if(name==='dterm'){ const c=CFG.dterm_lpf1&&CFG.dterm_lpf1.dyn; if(c){ emphV(G.ov,Hh,c[0],fmin,fmax,'#d48fd4'); emphV(G.ov,Hh,c[1],fmin,fmax,'#d48fd4','D-term LPF'); } }
+      else if(name==='notch'){ if(CFG.dyn_notch){ emphBand(G.ov,Hh,CFG.dyn_notch.min,CFG.dyn_notch.max,fmin,fmax,'#ffd479'); emphV(G.ov,Hh,CFG.dyn_notch.min,fmin,fmax,'#ffd479','min'); emphV(G.ov,Hh,CFG.dyn_notch.max,fmin,fmax,'#ffd479','max'); } }
+      else if(name==='fms'){ emphV(G.ov,Hh,fms,fmin,fmax,'#ffab40','f(Ms)'); emphV(P.ov,Hh,fms,fmin,fmax,'#ffab40','f(Ms)'); }
+    });
+    // untrusted-zone legend hover -> highlight the grey band on coherence, gain AND phase at once
+    bindHL(cohH,[{ov:CH.ov,h:Hh-30},{ov:G.ov,h:Hh},{ov:P.ov,h:Hh}], name=>{ if(name==='trust' && ftrust && ftrust<fmax){
+      emphBand(CH.ov,Hh-30,ftrust,fmax,fmin,fmax,'#8a93a5'); emphBand(G.ov,Hh,ftrust,fmax,fmin,fmax,'#8a93a5'); emphBand(P.ov,Hh,ftrust,fmax,fmin,fmax,'#8a93a5'); } });
+
+    // hover the f(Ms) vertical line on the Bode / phase plots -> a zoom tooltip. Bode reveals the
+    // sensitivity peak |S| = |1 − T| (Ms); phase reveals the measured margin (phase vs the −180° line
+    // at f(Ms)). The base canvas drives the tooltip; the overlay on top is pointer-events:none.
+    if (fms && fms>fmin && fms<fmax && d.freq && d.freq.length) {
+      const Fz=d.freq, GdB=d.gain_db, Pd=d.phase_deg, xline=logx(fms,fmin,fmax);
+      let ci=0,bd=1e9; for(let i=0;i<Fz.length;i++){ const dd=Math.abs(Fz[i]-fms); if(dd<bd){bd=dd;ci=i;} }
+      const wlo=Math.max(0,ci-20), whi=Math.min(Fz.length-1,ci+20), fL=Fz[wlo], fH=Fz[whi];
+      const zw=252, zh=140, Lz=34, Rz=10, Tz=16, Bz=16;
+      const lxp=ff=>Lz+(Math.log10(ff)-Math.log10(fL))/((Math.log10(fH)-Math.log10(fL))||1)*(zw-Lz-Rz);
+      const showZoom=(zc,capTxt,e)=>{ htipEl.innerHTML=''; const cap=el('div',null,capTxt);
+        cap.style.cssText='font:10px sans-serif;color:#9ecbff;margin-bottom:3px';
+        htipEl.style.whiteSpace='normal'; htipEl.style.maxWidth='none';
+        htipEl.appendChild(cap); htipEl.appendChild(zc); htipEl.style.display='block';
+        const right=e.clientX+16+zw < window.innerWidth;
+        htipEl.style.left=(right? e.clientX+16 : Math.max(8,e.clientX-zw-16))+'px';
+        htipEl.style.top=Math.min(e.clientY+14, window.innerHeight-zh-34)+'px'; };
+      const sdb=i=>{ const t=Math.pow(10,GdB[i]/20), ph=Pd[i]*Math.PI/180; const sre=1-t*Math.cos(ph), sim=-t*Math.sin(ph); return 20*Math.log10(Math.hypot(sre,sim)||1e-6); };
+      // Bode: sensitivity peak
+      G.canvas.classList.add('fmszoom'); G.canvas.style.cursor='crosshair';
+      G.canvas.onmousemove=e=>{ const r=G.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
+        if(Math.abs(mx-xline)>7){ htipEl.style.display='none'; return; }
+        const zc=document.createElement('canvas'); zc.width=zw; zc.height=zh; const z=zc.getContext('2d'); z.font='9px sans-serif';
+        let yl=1e9,yh=-1e9; for(let i=wlo;i<=whi;i++){ const v=sdb(i); yl=Math.min(yl,v,GdB[i]); yh=Math.max(yh,v,GdB[i]); }
+        const msdb=ms!=null?20*Math.log10(ms):yh; yh=Math.max(yh,msdb); const pad=(yh-yl)*0.12||1; yl-=pad; yh+=pad;
+        const yp=v=>(zh-Bz)-(v-yl)/((yh-yl)||1)*(zh-Bz-Tz);
+        z.fillStyle='#0d1016'; z.fillRect(0,0,zw,zh);
+        if(yl<0&&yh>0){ z.strokeStyle='#3a4150'; z.setLineDash([2,3]); z.beginPath(); z.moveTo(Lz,yp(0)); z.lineTo(zw-Rz,yp(0)); z.stroke(); z.setLineDash([]); }
+        // |T| gain (blue, the Bode curve) + |S| sensitivity (purple, |1−T|) overlaid
+        z.strokeStyle='#9ecbff'; z.lineWidth=1.4; z.beginPath(); for(let i=wlo;i<=whi;i++){ const x=lxp(Fz[i]),y=yp(GdB[i]); i===wlo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke();
+        z.strokeStyle='#ba9cff'; z.lineWidth=1.8; z.beginPath(); for(let i=wlo;i<=whi;i++){ const x=lxp(Fz[i]),y=yp(sdb(i)); i===wlo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke();
+        z.strokeStyle='#ffab40'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(lxp(fms),Tz); z.lineTo(lxp(fms),zh-Bz); z.stroke(); z.setLineDash([]);
+        z.fillStyle='#ba9cff'; z.beginPath(); z.arc(lxp(fms),yp(msdb),3.2,0,7); z.fill();
+        z.fillStyle='#cfe3ff'; z.fillText('Ms '+(ms!=null?ms.toFixed(2):'?')+' @ '+fms.toFixed(0)+' Hz', Lz, 10);
+        z.fillStyle='#9ecbff'; z.fillText('|T|', zw-Rz-46, 10); z.fillStyle='#ba9cff'; z.fillText('|S|', zw-Rz-22, 10);   // mini legend
+        z.strokeStyle='#2a2f3a'; z.beginPath(); z.moveTo(Lz,Tz); z.lineTo(Lz,zh-Bz); z.stroke();   // ordinate
+        z.fillStyle='#8893a5'; z.fillText(yh.toFixed(0)+' dB',2,Tz+6); z.fillText(yl.toFixed(0),2,zh-Bz);
+        z.fillText(fL.toFixed(0), Lz, zh-3); z.fillText(fH.toFixed(0)+' Hz', zw-Rz-32, zh-3);
+        showZoom(zc, (LANG==='fr'?'Zoom f(Ms) — gain |T| & sensibilité |S|=|1−T|':'f(Ms) zoom — gain |T| & sensitivity |S|=|1−T|'), e); };
+      G.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
+      // Phase: measured margin (phase vs −180° at f(Ms))
+      P.canvas.classList.add('fmszoom'); P.canvas.style.cursor='crosshair';
+      P.canvas.onmousemove=e=>{ const r=P.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
+        if(Math.abs(mx-xline)>7){ htipEl.style.display='none'; return; }
+        const zc=document.createElement('canvas'); zc.width=zw; zc.height=zh; const z=zc.getContext('2d'); z.font='9px sans-serif';
+        const phAt=wrap(Pd[ci]);
+        const pfL=Math.max(fmin,fms-10), pfH=Math.min(fmax,fms+10);   // ±10 Hz window around f(Ms), linear x
+        let plo=ci,phi=ci; while(plo>0 && Fz[plo-1]>=pfL) plo--; while(phi<Fz.length-1 && Fz[phi+1]<=pfH) phi++;
+        const pxp=ff=>Lz+(ff-pfL)/((pfH-pfL)||1)*(zw-Lz-Rz);
+        let pl=1e9,ph2=-1e9; for(let i=plo;i<=phi;i++){ const v=wrap(Pd[i]); pl=Math.min(pl,v); ph2=Math.max(ph2,v); }
+        pl=Math.min(pl,-185); ph2=Math.max(ph2,phAt,-175); const padp=(ph2-pl)*0.1||1; const yl=pl-padp, yh=ph2+padp;
+        const yp=v=>(zh-Bz)-(v-yl)/((yh-yl)||1)*(zh-Bz-Tz);
+        z.fillStyle='#0d1016'; z.fillRect(0,0,zw,zh);
+        const xm=pxp(fms), y180=yp(-180), yph=yp(phAt);
+        z.fillStyle='rgba(111,211,111,0.22)'; z.fillRect(xm-10, Math.min(y180,yph), 20, Math.abs(y180-yph));   // the margin interval
+        z.strokeStyle='#9ad'; z.lineWidth=1.8; z.beginPath(); for(let i=plo;i<=phi;i++){ const x=pxp(Fz[i]),y=yp(wrap(Pd[i])); i===plo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke();
+        z.strokeStyle='#ff8a80'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(Lz,y180); z.lineTo(zw-Rz,y180); z.stroke(); z.setLineDash([]);
+        z.fillStyle='#ff8a80'; z.fillText('−180°', zw-Rz-30, y180-2);
+        z.strokeStyle='#ffab40'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(xm,Tz); z.lineTo(xm,zh-Bz); z.stroke(); z.setLineDash([]);
+        z.fillStyle='#9ad'; z.beginPath(); z.arc(xm,yph,3.2,0,7); z.fill();
+        z.fillStyle='#cfe3ff'; z.fillText((LANG==='fr'?'marge ':'margin ')+(phAt+180).toFixed(0)+'° @ '+fms.toFixed(0)+' Hz', Lz, 10);
+        z.strokeStyle='#2a2f3a'; z.beginPath(); z.moveTo(Lz,Tz); z.lineTo(Lz,zh-Bz); z.stroke();   // ordinate
+        z.fillStyle='#8893a5'; z.fillText(yh.toFixed(0)+'°',2,Tz+6); z.fillText(yl.toFixed(0)+'°',2,zh-Bz);
+        z.fillText(pfL.toFixed(0), Lz, zh-3); z.fillText(pfH.toFixed(0)+' Hz', zw-Rz-32, zh-3);
+        showZoom(zc, (LANG==='fr'?'Zoom f(Ms) — marge mesurée vs −180°':'f(Ms) zoom — measured margin vs −180°'), e); };
+      P.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
+    }
 
     // step response (time domain)
     const sser=ser.filter(o=>o.p.step && o.p.step.t_ms && o.p.step.t_ms.length);
@@ -765,13 +924,19 @@ window.addEventListener('resize', onResize);
 // or the good/bad throttle-map teaching example on the '?' badge (.maptip).
 const onMove = e=>{
   const ht=htipEl;
+  // these canvases drive their own zoom tooltip on the shared htip — don't clear it from here
+  if (e.target.closest && e.target.closest('canvas.noisezoom, canvas.fmszoom')) return;
   const pe=e.target.closest && e.target.closest('.passtip[data-pass]');
   const me=e.target.closest && e.target.closest('.maptip');
-  if (pe) ht.innerHTML=cfgHTML(PASSES[+pe.dataset.pass]);
-  else if (me) ht.innerHTML=mapTipHTML();
+  if (pe) { ht.innerHTML=cfgHTML(PASSES[+pe.dataset.pass]); ht.style.whiteSpace='nowrap'; ht.style.maxWidth='none'; }
+  else if (me) { ht.innerHTML=mapTipHTML(); ht.style.whiteSpace='normal'; ht.style.maxWidth='420px'; }
   else { ht.style.display='none'; return; }
   ht.style.display='block';
-  ht.style.left=Math.min(e.clientX+14, window.innerWidth-ht.offsetWidth-12)+'px';
+  // pass tooltip: nowrap (no line breaks) + anchored to the LEFT of the cursor so it never gets
+  // squeezed against the right edge; the map tooltip keeps the right-of-cursor placement.
+  const lx = pe ? Math.max(8, e.clientX - ht.offsetWidth - 14)
+                : Math.min(e.clientX+14, window.innerWidth-ht.offsetWidth-12);
+  ht.style.left=lx+'px';
   ht.style.top=Math.min(e.clientY+14, window.innerHeight-ht.offsetHeight-12)+'px';
 };
 host.addEventListener('mousemove', onMove);

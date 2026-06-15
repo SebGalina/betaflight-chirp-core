@@ -22,6 +22,10 @@ def _assemble_report(passes: list, lang: str = "fr") -> dict:
     for k, p in enumerate(shown):
         p["n"] = base + k + 1
         p["ts"] = p.get("timestamp", "").replace("T", " ")
+        # source .bbl name -> bare basename so the renderer can label/distinguish passes
+        # (pill tooltip + comparison header). Absent file -> left untouched (mono-pass stays clean).
+        if p.get("file"):
+            p["file"] = pathlib.PurePath(p["file"]).name
         p["diff"] = config_diff(shown[k - 1]["config"], p["config"]) if k > 0 else ""
         # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light
         if k != primary:
