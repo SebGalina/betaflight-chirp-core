@@ -47,6 +47,7 @@ function cfgFields(cfg) {
   const o=[];
   for (const ax of ['roll','pitch','yaw']) { const p=(cfg.pids||{})[ax]; if (p) o.push([ax+' P/I/D', p.join('/')]); }
   if (cfg.d_max) o.push(['D_max', cfg.d_max.join('/')]);
+  if (cfg.ff && cfg.ff.some(v=>v)) o.push(['FF (R/P/Y)', cfg.ff.join('/')]);
   const lpf=(key,lbl)=>{ const d=cfg[key]||{}; const v=(d.dyn||d.static); if(v!=null){ const vs=Array.isArray(v)?v.join('–'):v; o.push([lbl,(vs+' Hz '+(d.type||'')).trim()]); } };
   lpf('gyro_lpf1','gyro LPF1'); lpf('gyro_lpf2','gyro LPF2'); lpf('dterm_lpf1','D-term LPF1'); lpf('dterm_lpf2','D-term LPF2');
   const dn=cfg.dyn_notch||{}; if(dn.count!=null) o.push(['dyn_notch','×'+dn.count+' Q'+dn.q+' ['+dn.min+'–'+dn.max+' Hz]']);
@@ -244,6 +245,30 @@ function drawMini2(canvas,lA,lB,ptsA,ptsB,colA,colB,uA,uB) {
   ctx.fillStyle='#8893a5'; ptsA.forEach((p,i)=>ctx.fillText(p.n, xpos(i)-3, ch-4));
   canvas._hpts=hp; miniHover(canvas);
 }
+// Ms vs throttle: one dot per repeat sweep, x = that sweep's mean throttle (%), y = its Ms. A line
+// rising left→right means the loop peaks more under power (propwash/oscillation zone) → bump TPA up top.
+function drawMiniThr(canvas,title,rows,color,opts){
+  opts=opts||{};
+  const ctx=canvas.getContext('2d'), cw=canvas.width, ch=canvas.height;
+  const L=34,Rr=10,Tt=18,Bb=16;
+  ctx.clearRect(0,0,cw,ch); ctx.font='10px sans-serif';
+  ctx.fillStyle=color; ctx.fillText(title,4,12);
+  if(!rows||!rows.length){ ctx.fillStyle='#5a6273'; ctx.fillText('—',L,ch/2); return; }
+  let vals=rows.map(r=>r.ms); if(opts.ctx_lo!=null)vals.push(opts.ctx_lo); if(opts.ctx_hi!=null)vals.push(opts.ctx_hi);
+  let ymin=Math.min(...vals), ymax=Math.max(...vals); if(ymax-ymin<1e-6){ymax+=1;ymin-=1;} const pad=(ymax-ymin)*0.14; ymin-=pad; ymax+=pad;
+  let xmin=Math.min(...rows.map(r=>r.throttle_pct)), xmax=Math.max(...rows.map(r=>r.throttle_pct));
+  if(xmax-xmin<1){xmax+=5;xmin-=5;} const xp=(xmax-xmin)*0.12; xmin=Math.max(0,xmin-xp); xmax=Math.min(100,xmax+xp);
+  const xpos=t=>L+(cw-L-Rr)*(t-xmin)/((xmax-xmin)||1), ypos=v=>(ch-Bb)-(v-ymin)/((ymax-ymin)||1)*(ch-Bb-Tt);
+  for(const z of (opts.zones||[])){ const y1=ypos(Math.min(z.hi,ymax)),y0=ypos(Math.max(z.lo,ymin)); if(y0>y1){ctx.fillStyle=z.fill; ctx.fillRect(L,y1,cw-Rr-L,y0-y1);} }
+  ctx.strokeStyle='#2a2f3a'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(L,Tt); ctx.lineTo(L,ch-Bb); ctx.lineTo(cw-Rr,ch-Bb); ctx.stroke();
+  ctx.fillStyle='#8893a5'; ctx.fillText(ymax.toFixed(1),2,Tt+7); ctx.fillText(ymin.toFixed(1),2,ch-Bb+2);
+  ctx.strokeStyle=color; ctx.globalAlpha=0.5; ctx.lineWidth=1; ctx.beginPath();
+  rows.forEach((r,i)=>{ const x=xpos(r.throttle_pct),y=ypos(r.ms); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }); ctx.stroke(); ctx.globalAlpha=1;
+  const hp=[]; rows.forEach(r=>{ const x=xpos(r.throttle_pct),y=ypos(r.ms); ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,2.6,0,7); ctx.fill();
+    hp.push({x,y,t:'Ms '+r.ms.toFixed(2)+' @ '+r.throttle_pct.toFixed(0)+'%'+(r.f_ms_hz?' · '+r.f_ms_hz.toFixed(0)+' Hz':'')}); });
+  ctx.fillStyle='#8893a5'; ctx.fillText(xmin.toFixed(0)+'%',L-2,ch-4); ctx.fillText(xmax.toFixed(0)+'%',cw-Rr-22,ch-4);
+  canvas._hpts=hp; miniHover(canvas);
+}
 function hline(ctx,h,val,ymin,ymax,color,label) {
   const y=lerp(val,ymin,ymax,h-22,8); ctx.strokeStyle=color; ctx.setLineDash([4,3]);
   ctx.beginPath(); ctx.moveTo(PAD,y); ctx.lineTo(W-12,y); ctx.stroke(); ctx.setLineDash([]);
@@ -320,7 +345,7 @@ const HIDDEN = new Set();   // pass indices whose overlay curves are hidden (pil
 // eye links them at a glance. Filter colours match the Bode overlay (gyro/dterm/notch). ---
 const IND={
   overshoot:{c:'#ff7a6b',p:'▲'}, rise:{c:'#ffc14d',p:'↑'}, settle:{c:'#59c2b0',p:'↓'},
-  margin:{c:'#6fd36f',p:'∠'}, ms:{c:'#b58cff',p:'◎'}, noise:{c:'#4fa3e0',p:'≈'}
+  margin:{c:'#6fd36f',p:'∠'}, ms:{c:'#b58cff',p:'◎'}, mt:{c:'#e57fb0',p:'⌖'}, noise:{c:'#4fa3e0',p:'≈'}
 };
 function citem(lbl) {
   if (/P\/I\/D/.test(lbl)) return {c:'#9ecbff',p:'⚙'};
@@ -473,6 +498,8 @@ function render() {
     const sm=(d,k)=>(d.step&&d.step.metrics)?d.step.metrics[k]:null;
     // Ms healthy/danger reference bands (cf. glossary): 1.3–2 = sain, >2 = nerveux/peu robuste.
     const MSZONES=[{lo:1.3,hi:2.0,fill:'rgba(120,200,120,0.14)'},{lo:2.0,hi:9,fill:'rgba(255,120,120,0.12)'}];
+    // Mt healthy/danger reference bands (cf. glossary): 1.0–1.5 = bien amorti, >1.5 = peaky/peu robuste.
+    const MTZONES=[{lo:1.0,hi:1.5,fill:'rgba(120,200,120,0.14)'},{lo:1.5,hi:9,fill:'rgba(255,120,120,0.12)'}];
     // each tile carries the shared INDICATOR identity (colour+picto from IND), so a column links to
     // the same-coloured sub-score in the tune note above. Axes (rows) are told apart by their label.
     const INDIC=[
@@ -481,6 +508,7 @@ function render() {
       {k:'s', key:'settle', t:(LANG==='fr'?'établiss.':'settle'), u:'ms', g:d=>sm(d,'settle_ms'), r:d=>d.settle_range},
       {k:'d', uA:'°', uB:'Hz', gA:d=>d.pm_guaranteed_deg, rA:d=>d.pm_guaranteed_range, gB:d=>d.f_ms_hz, rB:d=>d.f_ms_range},
       {k:'s', key:'ms', t:'Ms', u:'', g:d=>d.ms, r:d=>d.ms_range, opts:{ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES}},
+      {k:'s', key:'mt', t:'Mt', u:'', g:d=>d.mt, r:d=>d.mt_range, opts:{ctx_lo:1.0, ctx_hi:1.8, zones:MTZONES}},
     ];
     const axesSet=[]; PASSES.forEach(p=>Object.keys(p.axes||{}).forEach(a=>{ if(!axesSet.includes(a)) axesSet.push(a); }));
     const ord=['roll','pitch','yaw']; axesSet.sort((a,b)=>ord.indexOf(a)-ord.indexOf(b));
@@ -504,6 +532,10 @@ function render() {
             if (pts.some(p=>p.v!=null)) drawMini(mkMini(grid,mw,mh), IND[ind.key].p+' '+ind.t, pts, col, o2);
           }
         }
+        // Ms-vs-throttle mini, right after the Mt tile: Ms per repeat sweep against its mean throttle
+        // (TPA cue). Lives in the primary pass; only present when several sweeps span a throttle range.
+        const mtr=(PRI.axes[axis]||{}).ms_throttle;
+        if (mtr && mtr.length>=2) drawMiniThr(mkMini(grid,mw,mh), IND.ms.p+' '+T('ms_thr_t'), mtr, IND.ms.c, {ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES});
       }
     }
   }
@@ -614,9 +646,38 @@ function render() {
     }
 
     // noise spectrum (raw vs filtered PSD, dB) — drives the filtering decision
-    const ns=PRI.noise_spectrum;
-    if (ns && ns.freqs && ns.freqs.length) {
-      box.appendChild(el('h3',null,tip('noise_psd',T('noise_h'))+' ('+ns.axis+' gyro)'));
+    const ns0=PRI.noise_spectrum;
+    const AXC={roll:'#4fc3f7', pitch:'#ffb74d', yaw:'#81c784'};
+    if (ns0 && ns0.freqs && ns0.freqs.length) {
+      // per-axis gyro spectra: chips let the missing axes be overlaid on the same plot.
+      const NA = ns0.axes || {[ns0.axis]: ns0};
+      const axList = ['roll','pitch','yaw'].filter(a=>NA[a] && NA[a].freqs && NA[a].freqs.length);
+      const nscore=a=>Math.max(0,...((NA[a].peaks||[]).map(p=>p.above_floor_db).concat([0])));
+      // default = the most telling axis (highest peak above the floor)
+      let primAxis = axList.slice().sort((a,b)=>nscore(b)-nscore(a))[0] || ns0.axis;
+      const sel = new Set([primAxis]);
+      const head = el('h3',null,tip('noise_psd',T('noise_h'))+' ');
+      const axTag = el('span',null,'('+primAxis+' gyro)'); axTag.style.color='#8893a5'; head.appendChild(axTag);
+      const chips=[];
+      if (axList.length>1) {
+        const cw=el('span',null,'&nbsp;&nbsp;'+T('noise_axes')+' '); cw.style.cssText='font-size:.62em;font-weight:400;color:#8893a5';
+        for (const a of axList) {
+          const c=el('span',null,a); c.style.cssText='cursor:pointer;padding:1px 7px;margin:0 2px;border-radius:9px;border:1px solid '+AXC[a];
+          c.onclick=()=>{ sel.clear(); sel.add(a); primAxis=a; axTag.textContent='('+primAxis+' gyro)';
+            paintChips(); render(); };
+          chips.push([a,c]); cw.appendChild(c);
+        }
+        head.appendChild(cw);
+      }
+      const paintChips=()=>{ for(const [a,c] of chips){ const on=sel.has(a);
+        c.style.background=on?AXC[a]:'transparent'; c.style.color=on?'#0d1016':AXC[a]; } };
+      paintChips();
+      box.appendChild(head);
+      const nbody=el('div'); box.appendChild(nbody);
+      const render=()=>{ nbody.innerHTML=''; drawNoise(nbody); };
+
+    function drawNoise(box) {
+      const ns=NA[primAxis];
       const F=ns.freqs, fmin=Math.max(30,F[0]), fmax=F[F.length-1];
       // floor-relative axis: 0 = noise floor. Scale to the noise region (95th pct) so a stray
       // low-freq motion bump doesn't squash the plot.
@@ -650,8 +711,14 @@ function render() {
       for (const pk of (ns.peaks||[])) { if (pk.freq_hz<fmin||pk.freq_hz>fmax) continue;
         const x=logx(pk.freq_hz,fmin,fmax), y=lerp(pk.above_floor_db,lo,hi,H3-22,8);
         nc.fillStyle='#ffd479'; nc.beginPath(); nc.arc(x,y,2.6,0,7); nc.fill(); }
+      // overlay the other selected axes (their filtered PSD — what the loop actually sees), thinner & axis-coloured
+      const others=[...sel].filter(a=>a!==primAxis);
+      for (const a of others) { const o=NA[a]; if(!o||!o.freqs) continue;
+        const oo=o.freqs.map(_=>1);
+        plotLine(nc,H3,o.freqs,o.filt_db,oo,fmin,fmax,lo,hi,AXC[a],{lw:1.3}); }
       const nleg=el('div','legend',
-        (ns.has_unfilt?('<span style="color:#4fc3f7">— '+T('leg_raw')+'</span><span style="color:#80cbc4">— '+T('leg_filt')+'</span>'):'<span style="color:#4fc3f7">— gyro</span>')+
+        (ns.has_unfilt?('<span style="color:#4fc3f7">— '+T('leg_raw')+' ('+primAxis+')</span><span style="color:#80cbc4">— '+T('leg_filt')+'</span>'):'<span style="color:#4fc3f7">— gyro ('+primAxis+')</span>')+
+        others.map(a=>'<span style="color:'+AXC[a]+'">— '+a+' '+T('noise_axis_other')+'</span>').join('')+
         '<span style="color:#7e8aa0">-- '+T('leg_floor')+'</span>'+
         '<span style="color:#ff8a80">-- '+T('leg_resid')+'</span>'+
         '<span data-hl="gyro" style="color:#5a9bd4">| '+tip('gyro_lpf','coupures gyro LPF')+'</span>'+
@@ -705,7 +772,42 @@ function render() {
       };
       NC.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
       box.appendChild(el('div','legend',(ns.has_unfilt?T('noise_cap'):T('noise_cap_nounfilt')).replace('{psd}',tip('noise_psd','PSD'))));
-    }
+    } // drawNoise
+
+      render();
+
+      // D-term / motor-output spectrum: the HF oscillation that reaches the ESCs (heat/saturation)
+      const dm=ns0.dterm;
+      if (dm && (Object.keys(dm.axes||{}).length || dm.motor)) {
+        box.appendChild(el('h3',null,tip('dterm_psd',T('dterm_h'))));
+        const curves=[...Object.values(dm.axes||{}), dm.motor].filter(c=>c&&c.freqs&&c.freqs.length);
+        const F0=curves[0].freqs, dfmin=Math.max(30,F0[0]), dfmax=F0[F0.length-1];
+        let allv=[]; for(const c of curves) allv=allv.concat(c.db);
+        const sv=allv.slice().sort((a,b)=>a-b); const hiR=sv[Math.floor(sv.length*0.97)]||12;
+        const lo=-6, hi=Math.max(12,Math.ceil(hiR/5)*5+3);
+        const H4=160, DC=mkCanvasHL(box,H4), dc=DC.ctx; dc.font='10px sans-serif';
+        drawAxes(dc,H4,dfmin,dfmax,lo,hi,'dB/plancher');
+        if (CFG.dyn_notch) vband(dc,H4,CFG.dyn_notch.min,CFG.dyn_notch.max,dfmin,dfmax,'rgba(255,212,121,0.07)');
+        hline(dc,H4,0,lo,hi,'#7e8aa0','plancher');
+        hline(dc,H4,RESID_OK,lo,hi,'#ff8a80','+'+RESID_OK+' dB');
+        let dleg='';
+        for (const [a,c] of Object.entries(dm.axes||{})) { const oo=c.freqs.map(_=>1);
+          plotLine(dc,H4,c.freqs,c.db,oo,dfmin,dfmax,lo,hi,AXC[a],{lw:1.5});
+          for(const pk of (c.peaks||[])){ if(pk.freq_hz<dfmin||pk.freq_hz>dfmax) continue;
+            const x=logx(pk.freq_hz,dfmin,dfmax),y=lerp(pk.above_floor_db,lo,hi,H4-22,8);
+            dc.fillStyle=AXC[a]; dc.beginPath(); dc.arc(x,y,2.4,0,7); dc.fill(); }
+          dleg+='<span style="color:'+AXC[a]+'">— '+T('leg_dterm_sig')+' '+a+'</span>'; }
+        if (dm.motor) { const oo=dm.motor.freqs.map(_=>1);
+          plotLine(dc,H4,dm.motor.freqs,dm.motor.db,oo,dfmin,dfmax,lo,hi,'#ff9a6a',{lw:1.7});
+          for(const pk of (dm.motor.peaks||[])){ if(pk.freq_hz<dfmin||pk.freq_hz>dfmax) continue;
+            const x=logx(pk.freq_hz,dfmin,dfmax),y=lerp(pk.above_floor_db,lo,hi,H4-22,8);
+            dc.fillStyle='#ff9a6a'; dc.beginPath(); dc.arc(x,y,2.6,0,7); dc.fill(); }
+          dleg+='<span style="color:#ff9a6a">— '+T('leg_motor_out')+'</span>'; }
+        dleg+='<span style="color:#7e8aa0">-- '+T('leg_floor')+'</span><span style="color:#ff8a80">-- '+T('leg_resid')+'</span>';
+        box.appendChild(el('div','legend',dleg));
+        box.appendChild(el('div','legend',T('dterm_cap').replace('{psd}',tip('dterm_psd','PSD'))));
+      }
+    } // noise_spectrum
 
     const fsug=PRI.filter_suggestions||[], nsug=PRI.noise_suggestions||[];
     let s='<details class="coll"><summary class="collh">'+tip('resonance',T('filt_h'))+'</summary><ul class="sugg filt">';
@@ -721,14 +823,16 @@ function render() {
     const d=PRI.axes[axis]; if(!d||!d.freq) continue;
     const box=el('div','axis'); root.appendChild(box);
     const m=d.phase_margin_deg, fco=d.crossover_hz, mu=d.phase_margin_unc_deg;
-    const ms=d.ms, fms=d.f_ms_hz, pmg=d.pm_guaranteed_deg;
+    const ms=d.ms, fms=d.f_ms_hz, pmg=d.pm_guaranteed_deg, mt=d.mt, fmt=d.f_mt_hz;
     let mtxt;
     if (ms!=null) {
       // Robust scalars only: Ms, f(Ms) and the guaranteed margin. The 0 dB crossover
       // ("bandwidth") and the measured margin are dropped here — on very damped axes the
       // crossover detection breaks down and reports nonsense (e.g. 2 Hz / 165°). The Bode
-      // plots below still carry the full picture.
+      // plots below still carry the full picture. Mt (complementary-sensitivity peak) rides
+      // along as the tie-break companion to Ms when it's measurable.
       mtxt = tip('sensitivity','Ms')+' '+ms.toFixed(2)+' @ '+(fms?fms.toFixed(0):'?')+' Hz'
+           + (mt!=null ? ' · '+tip('comp_sensitivity','Mt')+' '+mt.toFixed(2)+' @ '+(fmt?fmt.toFixed(0):'?')+' Hz' : '')
            + ' · '+tip('phase_margin',T('pm_gtd'))+' ≥'+pmg.toFixed(0)+'°';
     } else {
       mtxt = m==null ? T('no_xover') : (tip('phase_margin',T('margin'))+' '+m.toFixed(0)+'°'+(mu?(' ±'+mu.toFixed(0)+'°'):'')+' @ '+(fco?fco.toFixed(0):'?')+' Hz');
@@ -765,7 +869,8 @@ function render() {
       +'<span data-hl="gyro" style="color:#5a9bd4;margin-right:12px">│ '+tip('gyro_lpf',T('leg_gyro'))+'</span>'
       +'<span data-hl="dterm" style="color:#d48fd4;margin-right:12px">│ '+tip('dterm_lpf',T('leg_dterm'))+'</span>'
       +'<span data-hl="notch" style="color:#ffd479;margin-right:12px">▮ '+tip('dyn_notch',T('leg_notch'))+'</span>'
-      +'<span data-hl="fms" style="color:#ffab40">│ '+tip('sensitivity',T('leg_fms'))+'</span></span>';
+      +'<span data-hl="fms" style="color:#ffab40;margin-right:12px">│ '+tip('sensitivity',T('leg_fms'))+'</span>'
+      +(mt!=null?'<span data-hl="fmt" style="color:#e57fb0">│ '+tip('comp_sensitivity',T('leg_fmt'))+'</span>':'')+'</span>';
     const gainH=el('h3',null,tip('gain',T('bode_h'))+bodeLeg); box.appendChild(gainH);
     let gAll=[]; ser.forEach(o=>gAll=gAll.concat(o.p.gain_db));
     if (d.gain_band) gAll=gAll.concat(d.gain_band[0],d.gain_band[1]);
@@ -775,6 +880,7 @@ function render() {
     coherZone(g,Hh,ftrust,fmin,fmax,'');
     filterOverlay(g,Hh,fmin,fmax,fms);
     hline(g,Hh,0,gmin,gmax,'#5a6273','0 dB');
+    if (mt!=null && fmt && fmt>fmin && fmt<fmax) vline(g,Hh,fmt,fmin,fmax,'#e57fb0','f(Mt)');
     if (d.gain_band && !HIDDEN.has(PRIMARY)) plotBand(g,Hh,d.freq,d.gain_band[0],d.gain_band[1],fmin,fmax,gmin,gmax,PCOL);
     for (const o of ser) plotLine(g,Hh,o.p.freq,o.p.gain_db,o.p.coherence,fmin,fmax,gmin,gmax,PAL[o.i%PAL.length],{dim:!o.primary, lw:o.primary?2.2:1.5});
 
@@ -795,20 +901,25 @@ function render() {
       else if(name==='dterm'){ const c=CFG.dterm_lpf1&&CFG.dterm_lpf1.dyn; if(c){ emphV(G.ov,Hh,c[0],fmin,fmax,'#d48fd4'); emphV(G.ov,Hh,c[1],fmin,fmax,'#d48fd4','D-term LPF'); } }
       else if(name==='notch'){ if(CFG.dyn_notch){ emphBand(G.ov,Hh,CFG.dyn_notch.min,CFG.dyn_notch.max,fmin,fmax,'#ffd479'); emphV(G.ov,Hh,CFG.dyn_notch.min,fmin,fmax,'#ffd479','min'); emphV(G.ov,Hh,CFG.dyn_notch.max,fmin,fmax,'#ffd479','max'); } }
       else if(name==='fms'){ emphV(G.ov,Hh,fms,fmin,fmax,'#ffab40','f(Ms)'); emphV(P.ov,Hh,fms,fmin,fmax,'#ffab40','f(Ms)'); }
+      else if(name==='fmt'){ if(fmt) emphV(G.ov,Hh,fmt,fmin,fmax,'#e57fb0','f(Mt)'); }
     });
     // untrusted-zone legend hover -> highlight the grey band on coherence, gain AND phase at once
     bindHL(cohH,[{ov:CH.ov,h:Hh-30},{ov:G.ov,h:Hh},{ov:P.ov,h:Hh}], name=>{ if(name==='trust' && ftrust && ftrust<fmax){
       emphBand(CH.ov,Hh-30,ftrust,fmax,fmin,fmax,'#8a93a5'); emphBand(G.ov,Hh,ftrust,fmax,fmin,fmax,'#8a93a5'); emphBand(P.ov,Hh,ftrust,fmax,fmin,fmax,'#8a93a5'); } });
 
-    // hover the f(Ms) vertical line on the Bode / phase plots -> a zoom tooltip. Bode reveals the
-    // sensitivity peak |S| = |1 − T| (Ms); phase reveals the measured margin (phase vs the −180° line
-    // at f(Ms)). The base canvas drives the tooltip; the overlay on top is pointer-events:none.
-    if (fms && fms>fmin && fms<fmax && d.freq && d.freq.length) {
-      const Fz=d.freq, GdB=d.gain_db, Pd=d.phase_deg, xline=logx(fms,fmin,fmax);
-      let ci=0,bd=1e9; for(let i=0;i<Fz.length;i++){ const dd=Math.abs(Fz[i]-fms); if(dd<bd){bd=dd;ci=i;} }
-      const wlo=Math.max(0,ci-20), whi=Math.min(Fz.length-1,ci+20), fL=Fz[wlo], fH=Fz[whi];
+    // hover the f(Ms) / f(Mt) vertical lines on the Bode / phase plots -> a zoom tooltip. The Bode
+    // zoom at f(Ms) shows the sensitivity peak |S| = |1 − T| (Ms); the Bode zoom at f(Mt) shows the
+    // complementary-sensitivity peak |T| (Mt, the closed-loop resonance); the phase zoom at f(Ms)
+    // shows the measured margin (phase vs the −180° line). The base canvas drives the tooltip; the
+    // overlay on top is pointer-events:none.
+    const hasMs = fms && fms>fmin && fms<fmax, hasMt = mt!=null && fmt && fmt>fmin && fmt<fmax;
+    if ((hasMs||hasMt) && d.freq && d.freq.length) {
+      const Fz=d.freq, GdB=d.gain_db, Pd=d.phase_deg;
       const zw=252, zh=140, Lz=34, Rz=10, Tz=16, Bz=16;
-      const lxp=ff=>Lz+(Math.log10(ff)-Math.log10(fL))/((Math.log10(fH)-Math.log10(fL))||1)*(zw-Lz-Rz);
+      const nearIdx=ff=>{ let ci=0,bd=1e9; for(let i=0;i<Fz.length;i++){ const dd=Math.abs(Fz[i]-ff); if(dd<bd){bd=dd;ci=i;} } return ci; };
+      const mkWin=ff=>{ const ci=nearIdx(ff), wlo=Math.max(0,ci-20), whi=Math.min(Fz.length-1,ci+20), fL=Fz[wlo], fH=Fz[whi];
+        const lxp=x=>Lz+(Math.log10(x)-Math.log10(fL))/((Math.log10(fH)-Math.log10(fL))||1)*(zw-Lz-Rz);
+        return {ci, wlo, whi, fL, fH, lxp}; };
       const showZoom=(zc,capTxt,e)=>{ htipEl.innerHTML=''; const cap=el('div',null,capTxt);
         cap.style.cssText='font:10px sans-serif;color:#9ecbff;margin-bottom:3px';
         htipEl.style.whiteSpace='normal'; htipEl.style.maxWidth='none';
@@ -817,10 +928,10 @@ function render() {
         htipEl.style.left=(right? e.clientX+16 : Math.max(8,e.clientX-zw-16))+'px';
         htipEl.style.top=Math.min(e.clientY+14, window.innerHeight-zh-34)+'px'; };
       const sdb=i=>{ const t=Math.pow(10,GdB[i]/20), ph=Pd[i]*Math.PI/180; const sre=1-t*Math.cos(ph), sim=-t*Math.sin(ph); return 20*Math.log10(Math.hypot(sre,sim)||1e-6); };
-      // Bode: sensitivity peak
-      G.canvas.classList.add('fmszoom'); G.canvas.style.cursor='crosshair';
-      G.canvas.onmousemove=e=>{ const r=G.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
-        if(Math.abs(mx-xline)>7){ htipEl.style.display='none'; return; }
+      const xlineMs = hasMs? logx(fms,fmin,fmax):null, Wms = hasMs? mkWin(fms):null;
+      const xlineMt = hasMt? logx(fmt,fmin,fmax):null, Wmt = hasMt? mkWin(fmt):null;
+      // Bode @ f(Ms): |T| + |S| sensitivity peak
+      const drawMsBode=e=>{ const {wlo,whi,fL,fH,lxp}=Wms;
         const zc=document.createElement('canvas'); zc.width=zw; zc.height=zh; const z=zc.getContext('2d'); z.font='9px sans-serif';
         let yl=1e9,yh=-1e9; for(let i=wlo;i<=whi;i++){ const v=sdb(i); yl=Math.min(yl,v,GdB[i]); yh=Math.max(yh,v,GdB[i]); }
         const msdb=ms!=null?20*Math.log10(ms):yh; yh=Math.max(yh,msdb); const pad=(yh-yl)*0.12||1; yl-=pad; yh+=pad;
@@ -838,39 +949,75 @@ function render() {
         z.fillStyle='#8893a5'; z.fillText(yh.toFixed(0)+' dB',2,Tz+6); z.fillText(yl.toFixed(0),2,zh-Bz);
         z.fillText(fL.toFixed(0), Lz, zh-3); z.fillText(fH.toFixed(0)+' Hz', zw-Rz-32, zh-3);
         showZoom(zc, (LANG==='fr'?'Zoom f(Ms) — gain |T| & sensibilité |S|=|1−T|':'f(Ms) zoom — gain |T| & sensitivity |S|=|1−T|'), e); };
-      G.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
-      // Phase: measured margin (phase vs −180° at f(Ms))
-      P.canvas.classList.add('fmszoom'); P.canvas.style.cursor='crosshair';
-      P.canvas.onmousemove=e=>{ const r=P.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
-        if(Math.abs(mx-xline)>7){ htipEl.style.display='none'; return; }
+      // Bode @ f(Mt): |T| complementary-sensitivity peak (closed-loop resonance)
+      const drawMtBode=e=>{ const {wlo,whi,fL,fH,lxp}=Wmt;
         const zc=document.createElement('canvas'); zc.width=zw; zc.height=zh; const z=zc.getContext('2d'); z.font='9px sans-serif';
-        const phAt=wrap(Pd[ci]);
-        const pfL=Math.max(fmin,fms-10), pfH=Math.min(fmax,fms+10);   // ±10 Hz window around f(Ms), linear x
-        let plo=ci,phi=ci; while(plo>0 && Fz[plo-1]>=pfL) plo--; while(phi<Fz.length-1 && Fz[phi+1]<=pfH) phi++;
-        const pxp=ff=>Lz+(ff-pfL)/((pfH-pfL)||1)*(zw-Lz-Rz);
-        let pl=1e9,ph2=-1e9; for(let i=plo;i<=phi;i++){ const v=wrap(Pd[i]); pl=Math.min(pl,v); ph2=Math.max(ph2,v); }
-        pl=Math.min(pl,-185); ph2=Math.max(ph2,phAt,-175); const padp=(ph2-pl)*0.1||1; const yl=pl-padp, yh=ph2+padp;
+        const mtdb=20*Math.log10(mt);
+        let yl=mtdb,yh=mtdb; for(let i=wlo;i<=whi;i++){ yl=Math.min(yl,GdB[i]); yh=Math.max(yh,GdB[i]); }
+        const pad=(yh-yl)*0.12||1; yl-=pad; yh+=pad;
         const yp=v=>(zh-Bz)-(v-yl)/((yh-yl)||1)*(zh-Bz-Tz);
         z.fillStyle='#0d1016'; z.fillRect(0,0,zw,zh);
-        const xm=pxp(fms), y180=yp(-180), yph=yp(phAt);
-        z.fillStyle='rgba(111,211,111,0.22)'; z.fillRect(xm-10, Math.min(y180,yph), 20, Math.abs(y180-yph));   // the margin interval
-        z.strokeStyle='#9ad'; z.lineWidth=1.8; z.beginPath(); for(let i=plo;i<=phi;i++){ const x=pxp(Fz[i]),y=yp(wrap(Pd[i])); i===plo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke();
-        z.strokeStyle='#ff8a80'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(Lz,y180); z.lineTo(zw-Rz,y180); z.stroke(); z.setLineDash([]);
-        z.fillStyle='#ff8a80'; z.fillText('−180°', zw-Rz-30, y180-2);
-        z.strokeStyle='#ffab40'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(xm,Tz); z.lineTo(xm,zh-Bz); z.stroke(); z.setLineDash([]);
-        z.fillStyle='#9ad'; z.beginPath(); z.arc(xm,yph,3.2,0,7); z.fill();
-        z.fillStyle='#cfe3ff'; z.fillText((LANG==='fr'?'marge ':'margin ')+(phAt+180).toFixed(0)+'° @ '+fms.toFixed(0)+' Hz', Lz, 10);
+        if(yl<0&&yh>0){ z.strokeStyle='#3a4150'; z.setLineDash([2,3]); z.beginPath(); z.moveTo(Lz,yp(0)); z.lineTo(zw-Rz,yp(0)); z.stroke(); z.setLineDash([]); }
+        // |T| gain (blue, the Bode curve); the Mt peak sits at its top
+        z.strokeStyle='#9ecbff'; z.lineWidth=1.6; z.beginPath(); for(let i=wlo;i<=whi;i++){ const x=lxp(Fz[i]),y=yp(GdB[i]); i===wlo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke();
+        z.strokeStyle='#e57fb0'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(lxp(fmt),Tz); z.lineTo(lxp(fmt),zh-Bz); z.stroke(); z.setLineDash([]);
+        z.fillStyle='#e57fb0'; z.beginPath(); z.arc(lxp(fmt),yp(mtdb),3.2,0,7); z.fill();
+        z.fillStyle='#cfe3ff'; z.fillText('Mt '+mt.toFixed(2)+' @ '+fmt.toFixed(0)+' Hz', Lz, 10);
+        z.fillStyle='#9ecbff'; z.fillText('|T|', zw-Rz-24, 10);   // mini legend
         z.strokeStyle='#2a2f3a'; z.beginPath(); z.moveTo(Lz,Tz); z.lineTo(Lz,zh-Bz); z.stroke();   // ordinate
-        z.fillStyle='#8893a5'; z.fillText(yh.toFixed(0)+'°',2,Tz+6); z.fillText(yl.toFixed(0)+'°',2,zh-Bz);
-        z.fillText(pfL.toFixed(0), Lz, zh-3); z.fillText(pfH.toFixed(0)+' Hz', zw-Rz-32, zh-3);
-        showZoom(zc, (LANG==='fr'?'Zoom f(Ms) — marge mesurée vs −180°':'f(Ms) zoom — measured margin vs −180°'), e); };
-      P.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
+        z.fillStyle='#8893a5'; z.fillText(yh.toFixed(0)+' dB',2,Tz+6); z.fillText(yl.toFixed(0),2,zh-Bz);
+        z.fillText(fL.toFixed(0), Lz, zh-3); z.fillText(fH.toFixed(0)+' Hz', zw-Rz-32, zh-3);
+        showZoom(zc, (LANG==='fr'?'Zoom f(Mt) — gain |T| (pic boucle fermée)':'f(Mt) zoom — gain |T| (closed-loop peak)'), e); };
+      // Bode canvas serves whichever marker the cursor is nearest (f(Ms) sensitivity / f(Mt) |T|).
+      G.canvas.classList.add('fmszoom'); G.canvas.style.cursor='crosshair';
+      G.canvas.onmousemove=e=>{ const r=G.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
+        const dMs=hasMs?Math.abs(mx-xlineMs):1e9, dMt=hasMt?Math.abs(mx-xlineMt):1e9;
+        if(dMs>7&&dMt>7){ htipEl.style.display='none'; return; }
+        (dMt<dMs?drawMtBode:drawMsBode)(e); };
+      G.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
+      // Phase @ f(Ms): measured margin (phase vs −180°) — Ms only
+      if (hasMs) { const {ci}=Wms, xline=xlineMs;
+        P.canvas.classList.add('fmszoom'); P.canvas.style.cursor='crosshair';
+        P.canvas.onmousemove=e=>{ const r=P.canvas.getBoundingClientRect(), mx=(e.clientX-r.left)*(W/(r.width||W));
+          if(Math.abs(mx-xline)>7){ htipEl.style.display='none'; return; }
+          const zc=document.createElement('canvas'); zc.width=zw; zc.height=zh; const z=zc.getContext('2d'); z.font='9px sans-serif';
+          const phAt=wrap(Pd[ci]);
+          const pfL=Math.max(fmin,fms-10), pfH=Math.min(fmax,fms+10);   // ±10 Hz window around f(Ms), linear x
+          let plo=ci,phi=ci; while(plo>0 && Fz[plo-1]>=pfL) plo--; while(phi<Fz.length-1 && Fz[phi+1]<=pfH) phi++;
+          const pxp=ff=>Lz+(ff-pfL)/((pfH-pfL)||1)*(zw-Lz-Rz);
+          let pl=1e9,ph2=-1e9; for(let i=plo;i<=phi;i++){ const v=wrap(Pd[i]); pl=Math.min(pl,v); ph2=Math.max(ph2,v); }
+          pl=Math.min(pl,-185); ph2=Math.max(ph2,phAt,-175); const padp=(ph2-pl)*0.1||1; const yl=pl-padp, yh=ph2+padp;
+          const yp=v=>(zh-Bz)-(v-yl)/((yh-yl)||1)*(zh-Bz-Tz);
+          z.fillStyle='#0d1016'; z.fillRect(0,0,zw,zh);
+          const xm=pxp(fms), y180=yp(-180), yph=yp(phAt);
+          z.fillStyle='rgba(111,211,111,0.22)'; z.fillRect(xm-10, Math.min(y180,yph), 20, Math.abs(y180-yph));   // the margin interval
+          z.strokeStyle='#9ad'; z.lineWidth=1.8; z.beginPath(); for(let i=plo;i<=phi;i++){ const x=pxp(Fz[i]),y=yp(wrap(Pd[i])); i===plo?z.moveTo(x,y):z.lineTo(x,y); } z.stroke();
+          z.strokeStyle='#ff8a80'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(Lz,y180); z.lineTo(zw-Rz,y180); z.stroke(); z.setLineDash([]);
+          z.fillStyle='#ff8a80'; z.fillText('−180°', zw-Rz-30, y180-2);
+          z.strokeStyle='#ffab40'; z.setLineDash([3,2]); z.beginPath(); z.moveTo(xm,Tz); z.lineTo(xm,zh-Bz); z.stroke(); z.setLineDash([]);
+          z.fillStyle='#9ad'; z.beginPath(); z.arc(xm,yph,3.2,0,7); z.fill();
+          z.fillStyle='#cfe3ff'; z.fillText((LANG==='fr'?'marge ':'margin ')+(phAt+180).toFixed(0)+'° @ '+fms.toFixed(0)+' Hz', Lz, 10);
+          z.strokeStyle='#2a2f3a'; z.beginPath(); z.moveTo(Lz,Tz); z.lineTo(Lz,zh-Bz); z.stroke();   // ordinate
+          z.fillStyle='#8893a5'; z.fillText(yh.toFixed(0)+'°',2,Tz+6); z.fillText(yl.toFixed(0)+'°',2,zh-Bz);
+          z.fillText(pfL.toFixed(0), Lz, zh-3); z.fillText(pfH.toFixed(0)+' Hz', zw-Rz-32, zh-3);
+          showZoom(zc, (LANG==='fr'?'Zoom f(Ms) — marge mesurée vs −180°':'f(Ms) zoom — measured margin vs −180°'), e); };
+        P.canvas.onmouseleave=()=>{ htipEl.style.display='none'; };
+      }
     }
 
     // step response (time domain)
     const sser=ser.filter(o=>o.p.step && o.p.step.t_ms && o.p.step.t_ms.length);
     if (sser.length) {
-      box.appendChild(el('h3',null,tip('step_response',T('step_h'))));
+      const stepHead=el('h3',null,tip('step_response',T('step_h'))+' ');
+      // FF chip: this axis' feedforward gain (from the header). Chirp measures the closed loop, so FF
+      // is invisible in the Bode/step curves themselves — the chip surfaces whether (and how much) it's on.
+      const ffv=(CFG.ff||[])[['roll','pitch','yaw'].indexOf(axis)];
+      if (ffv!=null) { const on=ffv>0;
+        const fc=el('span',null,tip('feedforward', on?T('ff_lbl')+' '+ffv:T('ff_off')));
+        fc.style.cssText='font-size:.6em;font-weight:400;padding:1px 7px;border-radius:9px;'+
+          (on?'background:#3aa0ff;color:#04121f':'border:1px solid #5a6273;color:#8893a5');
+        stepHead.appendChild(fc); }
+      box.appendChild(stepHead);
       // Full window on the main plot; y normalised to 0.25 steps so 1.0 is always a gridline.
       let xmax=0, ymax=1.0; sser.forEach(o=>{ xmax=Math.max(xmax,o.p.step.t_ms[o.p.step.t_ms.length-1]); ymax=Math.max(ymax,...o.p.step.y); });
       if (d.step.y_hi) ymax=Math.max(ymax,...d.step.y_hi);
@@ -904,8 +1051,8 @@ function render() {
 
   // ---- Glossary ----
   {
-    const order=['chirp','gain','phase','sensitivity','phase_margin','crossover','coherence','resonance',
-      'noise_psd','motor_harmonics','filtering','gyro_lpf','dterm_lpf','dyn_notch','rpm_filter','dmax','pid','throttle_map','spectrogram','step_response','propwash'];
+    const order=['chirp','gain','phase','sensitivity','comp_sensitivity','phase_margin','crossover','coherence','resonance',
+      'noise_psd','dterm_psd','motor_harmonics','filtering','gyro_lpf','dterm_lpf','dyn_notch','rpm_filter','dmax','pid','feedforward','throttle_map','spectrogram','step_response','propwash'];
     const box=el('div','axis'); root.appendChild(box);
     let s='<details class="coll"><summary class="collh2"><span class=sicon>📖</span>'+T('glossary_h')+'</summary><dl class=glos>';
     // entries sorted alphanumerically by their displayed term name (in the active language)
