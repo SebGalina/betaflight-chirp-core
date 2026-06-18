@@ -809,6 +809,110 @@ function render() {
       }
     } // noise_spectrum
 
+    // ── Filter Quality gauges ─────────────────────────────────────────────────
+    const fq = PRI.filter_quality;
+    if (fq && fq.axes && Object.keys(fq.axes).length) {
+      box.appendChild(el('h3', null, tip('filter_quality', T('fq_h'))));
+      const fqAxes = ['roll','pitch','yaw'].filter(a => fq.axes[a] && fq.axes[a].score != null);
+      const nRows = fqAxes.length + 1;         // axes + mean row
+      const ROW = 26, HDR = 22, BOT = 8;
+      const Hfq = HDR + nRows * ROW + BOT;
+      const c = mkCanvas(box, Hfq).getContext('2d');
+      c.font = '10px sans-serif';
+      const GAP = 14;
+      const barArea = W - PAD - 12;
+      const GW = Math.floor((barArea - 2 * GAP) / 3);
+      const VCOL = 34;
+      const BW = GW - VCOL;
+      const gx = m => PAD + m * (GW + GAP);
+      const scCol = s => s >= 0.8 ? '#6fd36f' : s >= 0.6 ? '#ffc14d' : '#ff7a6b';
+      const mDef = [
+        {key:'score_attenuation', lbl:T('fq_atten'), col:'#4fa3e0'},
+        {key:'score_preservation', lbl:T('fq_pres'),  col:'#6fd36f'},
+        {key:'score',              lbl:T('fq_score'), col:'#b58cff'},
+      ];
+      const FQ_ZONES = [
+        {lo:0,   hi:0.6, f:'rgba(255,70,50,0.13)'},
+        {lo:0.6, hi:0.8, f:'rgba(255,190,50,0.13)'},
+        {lo:0.8, hi:1.0, f:'rgba(50,200,80,0.13)'},
+      ];
+      // hatch pattern for excess (over 0.8 on score bar) — built once, reused per row
+      const fqHatch = (() => {
+        const hp = document.createElement('canvas'); hp.width = 6; hp.height = 6;
+        const hc = hp.getContext('2d');
+        hc.strokeStyle = 'rgba(255,193,60,0.60)'; hc.lineWidth = 1.2;
+        hc.beginPath(); hc.moveTo(0,6); hc.lineTo(6,0); hc.stroke();
+        return c.createPattern(hp, 'repeat');
+      })();
+      // metric column headers
+      for (let m = 0; m < 3; m++) {
+        c.fillStyle = mDef[m].col;
+        c.fillText(mDef[m].lbl, gx(m), HDR - 6);
+      }
+      // subtle threshold guide lines at 0.6 and 0.8 through all rows
+      for (const [t, stroke] of [[0.6,'rgba(255,190,50,0.30)'],[0.8,'rgba(50,200,80,0.30)']]) {
+        c.setLineDash([2, 3]); c.lineWidth = 0.8; c.strokeStyle = stroke;
+        for (let m = 0; m < 3; m++) {
+          const x = gx(m) + t * BW;
+          c.beginPath(); c.moveTo(x, HDR - 2); c.lineTo(x, HDR + nRows * ROW); c.stroke();
+        }
+      }
+      c.setLineDash([]);
+      const drawGaugeRow = (label, data, ri, axCol, isMean) => {
+        const y0 = HDR + ri * ROW + 3, bh = ROW - 8;
+        const rec = data && data.recommendation;
+        const isDecrease = rec && rec.startsWith('decrease');
+        c.font = isMean ? 'bold 10px sans-serif' : '10px sans-serif';
+        c.fillStyle = axCol; c.textAlign = 'right';
+        c.fillText(label, PAD - 4, y0 + bh - 1);
+        c.textAlign = 'left'; c.font = '10px sans-serif';
+        for (let m = 0; m < 3; m++) {
+          const x0 = gx(m);
+          const val = (data && data[mDef[m].key] != null) ? data[mDef[m].key] : null;
+          // zone backgrounds
+          for (const z of FQ_ZONES) { c.fillStyle = z.f; c.fillRect(x0 + z.lo * BW, y0, (z.hi - z.lo) * BW, bh); }
+          // bar outline
+          c.strokeStyle = '#1a1f2b'; c.lineWidth = 0.5; c.setLineDash([]);
+          c.strokeRect(x0, y0, BW, bh);
+          if (val != null) {
+            const col = scCol(val);
+            // score column (m===2): split fill — solid to 0.8, hatch for excess
+            if (m === 2 && val > 0.8) {
+              c.globalAlpha = 0.62; c.fillStyle = '#6fd36f';
+              c.fillRect(x0, y0, 0.8 * BW, bh);
+              c.globalAlpha = 0.90; c.fillStyle = fqHatch;
+              c.fillRect(x0 + 0.8 * BW, y0, (val - 0.8) * BW, bh);
+              c.globalAlpha = 1;
+            } else {
+              c.globalAlpha = 0.60; c.fillStyle = col; c.fillRect(x0, y0, val * BW, bh); c.globalAlpha = 1;
+            }
+            // marker tick
+            c.strokeStyle = col; c.lineWidth = 2;
+            c.beginPath(); c.moveTo(x0 + val * BW, y0 - 1); c.lineTo(x0 + val * BW, y0 + bh + 1); c.stroke();
+            // value label + directional arrow on score column
+            c.fillStyle = col;
+            c.fillText(val.toFixed(2), x0 + BW + 4, y0 + bh - 1);
+            if (m === 2 && isDecrease) {
+              c.fillStyle = '#ffc14d';
+              c.fillText('←', x0 + BW + VCOL - 12, y0 + bh - 1);
+            }
+          } else {
+            c.fillStyle = '#8893a5'; c.fillText('—', x0 + BW + 4, y0 + bh - 1);
+          }
+        }
+      };
+      for (let i = 0; i < fqAxes.length; i++) drawGaugeRow(fqAxes[i], fq.axes[fqAxes[i]], i, AXC[fqAxes[i]], false);
+      c.strokeStyle = '#2a3040'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(PAD, HDR + fqAxes.length * ROW + 1); c.lineTo(W - 12, HDR + fqAxes.length * ROW + 1); c.stroke();
+      drawGaugeRow(T('fq_mean'), fq.mean || {}, fqAxes.length, '#9ecbff', true);
+      const fqmd = fq.mean || {};
+      if (fqmd.recommendation) {
+        const recStr = T('fq_rec_'+fqmd.recommendation) || fqmd.recommendation;
+        box.appendChild(el('div','legend','→ '+recStr));
+      }
+      box.appendChild(el('div', 'legend', T('fq_cap')));
+    }
+
     const fsug=PRI.filter_suggestions||[], nsug=PRI.noise_suggestions||[];
     let s='<details class="coll"><summary class="collh">'+tip('resonance',T('filt_h'))+'</summary><ul class="sugg filt">';
     for (const x of fsug) s+='<li>'+loc(x)+'</li>';

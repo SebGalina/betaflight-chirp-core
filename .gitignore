@@ -1,3 +1,6 @@
+# generated reports (local dev preview)
+*.html
+
 # python
 __pycache__/
 *.pyc

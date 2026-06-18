@@ -271,6 +271,19 @@ GLOSSARY = {
               "absolute '−10 dB' threshold: it is arbitrary and flight-dependent; the real judges are phase margin "
               "and motor temperature.",
     },
+    "filter_quality": {
+        "fr": "Qualité du filtrage — deux angles complémentaires. "
+              "Atténuation (A) : dans quelle mesure le filtre supprime le bruit haute fréquence au-dessus de f_split ; "
+              "sans ça les ESC chauffent. Préservation (P) : dans quelle mesure le signal utile (< f_split) est "
+              "conservé — trop de filtre ajoute du délai et rogne la marge de phase. Le Score est leur moyenne "
+              "harmonique 2AP/(A+P), qui pénalise le maillon le plus faible. "
+              "1.0 = filtrage parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
+        "en": "Filter quality — two complementary angles. "
+              "Attenuation (A): how well the filter suppresses HF noise above f_split — without this ESCs overheat. "
+              "Preservation (P): how well the useful signal (< f_split) is retained — over-filtering adds delay and "
+              "eats phase margin. Score is their harmonic mean 2AP/(A+P), penalising the weakest link. "
+              "1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
+    },
     "feedforward": {
         "fr": "Feedforward (FF) : un terme qui pousse la commande directement à partir du mouvement du "
               "manche (la dérivée de la consigne), sans attendre que le gyro voie l'erreur. Il accélère la "
@@ -363,6 +376,16 @@ STRINGS = {
         "leg_dterm_sig": "D-term", "leg_motor_out": "sortie moteur",
         "ff_lbl": "FF", "ff_off": "FF désactivé",
         "ms_thr_t": "Ms / gaz",
+        "fq_h": "Qualité du filtrage",
+        "fq_atten": "Atténuation", "fq_pres": "Préservation", "fq_score": "Score global", "fq_mean": "moy.",
+        "fq_cap": "Atténuation = suppression bruit HF · Préservation = signal utile conservé · "
+                  "Score = moyenne harmonique (pénalise le maillon faible) · vert ≥ 0.8 · ambre 0.6–0.8 · rouge < 0.6",
+        "fq_rec_decrease_strong": "Réduire D-LPF (sur-filtré, perte de signal et délai excessif)",
+        "fq_rec_decrease_slight": "Réduire légèrement D-LPF",
+        "fq_rec_sweet_spot": "Filtrage équilibré",
+        "fq_rec_increase_slight": "Augmenter légèrement D-LPF",
+        "fq_rec_increase_strong": "Augmenter D-LPF (bruit HF excessif, risque de chauffe moteur)",
+        "fq_rec_insufficient_data": "Données insuffisantes (émergence de bruit non détectée)",
         "step2_h": "PID",
         "sanity_h": "Contrôle des mesures — balayage du chirp",
         "spectro_cap": "{sg} — gyro {ax} pendant le sweep. La diagonale qui monte = le chirp ; les bandes "
@@ -448,6 +471,16 @@ STRINGS = {
         "leg_dterm_sig": "D-term", "leg_motor_out": "motor output",
         "ff_lbl": "FF", "ff_off": "FF off",
         "ms_thr_t": "Ms / throttle",
+        "fq_h": "Filter Quality",
+        "fq_atten": "Attenuation", "fq_pres": "Preservation", "fq_score": "Global score", "fq_mean": "mean",
+        "fq_cap": "Attenuation = HF noise suppression · Preservation = useful signal retained · "
+                  "Score = harmonic mean (penalises weakest link) · green ≥ 0.8 · amber 0.6–0.8 · red < 0.6",
+        "fq_rec_decrease_strong": "Reduce D-LPF cutoff (over-filtered — signal loss and excess delay)",
+        "fq_rec_decrease_slight": "Slightly reduce D-LPF cutoff",
+        "fq_rec_sweet_spot": "Filtering well balanced",
+        "fq_rec_increase_slight": "Slightly increase D-LPF cutoff",
+        "fq_rec_increase_strong": "Increase D-LPF cutoff (excessive HF noise — risk of motor heat)",
+        "fq_rec_insufficient_data": "Insufficient data (no noise emergence detected)",
         "step2_h": "PID",
         "sanity_h": "Measurement check — chirp sweep",
         "spectro_cap": "{sg} — {ax} gyro during the sweep. The rising diagonal = the chirp; horizontal "
