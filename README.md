@@ -90,6 +90,7 @@ Four return surfaces, from raw to ready-to-render:
   "crossover_hz": 32.0,                    # 0 dB crossover
   "phase_margin_deg": 41.0, "phase_margin_unc_deg": 6.0,
   "ms": 4.8, "f_ms_hz": 70.0, "pm_guaranteed_deg": 34.0,   # peak sensitivity (robustness)
+  "mt": 1.2, "f_mt_hz": 28.0,              # peak complementary sensitivity max|T| (closed-loop resonance / delay robustness)
   "step": {                                # setpoint→gyro step response
     "t_ms": [...], "y": [...], "y_lo": [...], "y_hi": [...],
     "metrics": {"overshoot_pct": 12.0, "rise_ms": 18.0, "delay_ms": 3.0,

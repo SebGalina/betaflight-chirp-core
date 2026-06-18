@@ -94,6 +94,25 @@ GLOSSARY = {
               "rings (step overshoot climbs, propwash sets in). Lower Ms by restoring margin (less "
               "P/D, or more filtering before the PIDs).",
     },
+    "comp_sensitivity": {
+        "fr": "Pic de sensibilité complémentaire Mt : Mt = max|T(f)|, où T = la boucle fermée "
+              "mesurée par le chirp (gyro/consigne). Là où Ms = max|S| juge le rejet des perturbations "
+              "et la robustesse aux erreurs de modèle au point le plus fragile, Mt est le pic de "
+              "résonance de la boucle fermée elle-même. Repères : Mt ≈ 1.0–1.5 = bien amorti et "
+              "robuste, notamment face aux retards purs (transport/calcul, déjà inclus dans le T "
+              "mesuré) ; >1.5 = boucle peaky, peu amortie. Sert d'arbitre quand deux configs ont le "
+              "même Ms : à Ms égal, le Mt le plus bas a le meilleur amortissement global et la "
+              "meilleure robustesse aux délais. Mesuré sur la même bande cohérente que Ms, donc "
+              "directement comparable.",
+        "en": "Complementary sensitivity peak Mt: Mt = max|T(f)|, where T = the closed loop the chirp "
+              "measures (gyro/setpoint). Where Ms = max|S| judges disturbance rejection and "
+              "model-error robustness at the loop's most fragile point, Mt is the resonant peak of the "
+              "closed loop itself. Rules of thumb: Mt ≈ 1.0–1.5 = well-damped and robust, notably to "
+              "pure delay (transport/compute, already folded into the measured T); >1.5 = peaky, "
+              "lightly-damped loop. Use it as the tie-break when two configs share the same Ms: at "
+              "equal Ms, the lower Mt has the better global damping and delay robustness. Measured over "
+              "the same coherent band as Ms, so directly comparable.",
+    },
     "crossover": {
         "fr": "Crossover 0 dB : la fréquence où le gain passe sous 0 dB. C'est en gros la bande "
               "passante de l'axe — jusqu'où le drone suit fidèlement les ordres. Plus elle est haute, "
@@ -252,6 +271,34 @@ GLOSSARY = {
               "absolute '−10 dB' threshold: it is arbitrary and flight-dependent; the real judges are phase margin "
               "and motor temperature.",
     },
+    "feedforward": {
+        "fr": "Feedforward (FF) : un terme qui pousse la commande directement à partir du mouvement du "
+              "manche (la dérivée de la consigne), sans attendre que le gyro voie l'erreur. Il accélère la "
+              "réponse aux ordres rapides (flips, virages secs) sans toucher à la stabilité de la boucle PID — "
+              "le chirp mesure la boucle fermée, donc le FF n'apparaît pas dans le Bode, mais il change le "
+              "ressenti au manche. 0 = désactivé ; trop de FF = à-coups/overshoot sur les mouvements vifs.",
+        "en": "Feedforward (FF): a term that drives the command straight from stick motion (the setpoint "
+              "derivative), without waiting for the gyro to see the error. It speeds up the response to fast "
+              "inputs (flips, hard turns) without touching PID-loop stability — the chirp measures the closed "
+              "loop, so FF does not show up in the Bode plot, but it changes stick feel. 0 = off; too much FF = "
+              "jerky/overshooting on quick moves.",
+    },
+    "dterm_psd": {
+        "fr": "Spectre D-term / sortie moteur (PSD, dB) : densité de puissance du terme D (axisD) et de la "
+              "commande moteur, hors chirp, référencée au plancher de bruit (0 dB = plancher). Le D est le chemin "
+              "du PID qui domine la commande moteur en haute fréquence : un pic marqué en HF ici, c'est "
+              "l'oscillation qui sature les ESC et chauffe les moteurs — le gyro filtré peut sembler propre alors "
+              "que le D-term et les moteurs résonnent encore. La courbe moteur moyenne les PSD des moteurs (le "
+              "bruit décorrélé s'atténue, une oscillation commune survit). À surveiller surtout au-dessus de "
+              "~200 Hz : c'est là que vit la chauffe sans qu'on la sente au manche.",
+        "en": "D-term / motor-output spectrum (PSD, dB): power density of the D term (axisD) and the motor "
+              "command, outside the chirp, referenced to the noise floor (0 dB = floor). D is the PID path that "
+              "dominates the motor command at high frequency: a sharp HF peak here is the oscillation that "
+              "saturates the ESCs and heats the motors — the filtered gyro can look clean while the D-term and "
+              "motors still ring. The motor curve averages the per-motor PSDs (uncorrelated noise averages down, a "
+              "shared oscillation survives). Watch the band above ~200 Hz: that is where heat lives without being "
+              "felt on the sticks.",
+    },
     "propwash": {
         "fr": "Propwash : les oscillations/secousses quand le drone retombe dans ses propres turbulences "
               "(descentes rapides, sorties de virage). Souvent lié à un D mou ou trop filtré, ou à une "
@@ -308,6 +355,14 @@ STRINGS = {
         "noise_cap_nounfilt": "{psd} — gyro filtré (gyroUnfilt absent du log). 0 dB = plancher de bruit.",
         "leg_raw": "brut (unfilt)", "leg_filt": "filtré (gyroADC)",
         "leg_floor": "plancher", "leg_resid": "résiduel (indicatif)", "leg_motor": "harmoniques moteur",
+        "noise_axes": "axes :", "noise_axis_other": "(filtré)",
+        "dterm_h": "Spectre D-term / sortie moteur (PSD, dB)",
+        "dterm_cap": "{psd} — D-term (axisD) par axe + sortie moteur moyennée, hors chirp. 0 dB = plancher. "
+                     "C'est le chemin qui atteint les ESC : un pic en haute fréquence = oscillation qui sature et "
+                     "chauffe les moteurs, même si le gyro filtré paraît propre.",
+        "leg_dterm_sig": "D-term", "leg_motor_out": "sortie moteur",
+        "ff_lbl": "FF", "ff_off": "FF désactivé",
+        "ms_thr_t": "Ms / gaz",
         "step2_h": "PID",
         "sanity_h": "Contrôle des mesures — balayage du chirp",
         "spectro_cap": "{sg} — gyro {ax} pendant le sweep. La diagonale qui monte = le chirp ; les bandes "
@@ -338,6 +393,7 @@ STRINGS = {
         "w_pm": "marge de stabilité", "w_res": "résonances",
         "leg_gyro": "gyro lpf", "leg_dterm": "dterm lpf", "leg_notch": "plage dyn_notch",
         "leg_xover": "crossover 0 dB", "leg_fms": "f(Ms) — pic de sensibilité",
+        "leg_fmt": "f(Mt) — pic compl.",
         "metrics": "overshoot {ov}% · montée {rise} ms · établi {settle} ms",
         "render_err": "⚠ Rendu interrompu : ",
     },
@@ -384,6 +440,14 @@ STRINGS = {
         "noise_cap_nounfilt": "{psd} — filtered gyro (gyroUnfilt absent from the log). 0 dB = noise floor.",
         "leg_raw": "raw (unfilt)", "leg_filt": "filtered (gyroADC)",
         "leg_floor": "floor", "leg_resid": "residual (indicative)", "leg_motor": "motor harmonics",
+        "noise_axes": "axes:", "noise_axis_other": "(filtered)",
+        "dterm_h": "D-term / motor-output spectrum (PSD, dB)",
+        "dterm_cap": "{psd} — D-term (axisD) per axis + averaged motor output, outside the chirp. 0 dB = floor. "
+                     "This is the path that reaches the ESCs: a high-frequency peak = an oscillation that "
+                     "saturates and heats the motors, even when the filtered gyro looks clean.",
+        "leg_dterm_sig": "D-term", "leg_motor_out": "motor output",
+        "ff_lbl": "FF", "ff_off": "FF off",
+        "ms_thr_t": "Ms / throttle",
         "step2_h": "PID",
         "sanity_h": "Measurement check — chirp sweep",
         "spectro_cap": "{sg} — {ax} gyro during the sweep. The rising diagonal = the chirp; horizontal "
@@ -414,6 +478,7 @@ STRINGS = {
         "w_pm": "stability margin", "w_res": "resonances",
         "leg_gyro": "gyro lpf", "leg_dterm": "dterm lpf", "leg_notch": "dyn_notch range",
         "leg_xover": "0 dB crossover", "leg_fms": "f(Ms) — sensitivity peak",
+        "leg_fmt": "f(Mt) — compl. peak",
         "metrics": "overshoot {ov}% · rise {rise} ms · settle {settle} ms",
         "render_err": "⚠ Render interrupted: ",
     },

@@ -7,12 +7,16 @@ decoded DataFrame + sample rate, returns plain dicts.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
 from scipy import signal as sp_signal
+from scipy.integrate import trapezoid
 
 from ..signal import AXES, THROTTLE_COL, TIME_COL
 
@@ -354,6 +358,32 @@ def _sensitivity_peak(freqs, H, coh, fmin, fmax):
     return round(float(fb[i]), 1), round(ms, 2), round(pm, 0)
 
 
+def _comp_sensitivity_peak(freqs, H, coh, fmin, fmax):
+    """Peak of the complementary sensitivity T(f) = H, the measured closed-loop FRF.
+
+    Mt = max|T| over the coherent swept band. Where Ms = max|S| watches disturbance
+    rejection / model-error robustness at the loop's most fragile point, Mt is the
+    resonant peak of the closed loop itself: a low Mt (~1.0–1.5) means well-damped
+    tracking and good robustness to pure transport/compute delay (the lag already
+    folded into the measured T); a high Mt flags a peaky, lightly-damped closed loop.
+    Use it as the tie-break companion to Ms — same band, same gate, same smoothing, so
+    the two are directly comparable. Restricted to the coherent swept band so incoherent
+    high-frequency garbage can't fake a peak; lightly smoothed so one noisy bin can't win.
+
+    Returns (f_mt_hz, mt) or (None, None).
+    """
+    band = (freqs >= fmin) & (freqs <= fmax) & (coh >= COHERENCE_GATE)
+    if int(band.sum()) < 6:
+        return None, None
+    fb = freqs[band]
+    t = _smooth(np.abs(H[band]), min(9, int(band.sum()) | 1))
+    i = int(np.argmax(t))
+    mt = float(t[i])
+    if mt <= 1e-6:
+        return None, None
+    return round(float(fb[i]), 1), round(mt, 2)
+
+
 def _diagnose(peaks, phase_margin, fmin, fmax) -> list[dict]:
     """Bode diagnosis hints, each as a {fr, en} pair."""
     hints = []
@@ -454,6 +484,15 @@ def _throttle_series(df: pd.DataFrame) -> tuple:
         lo, hi = float(np.percentile(v, 2)), float(np.percentile(v, 98))
         return v, lo + 0.10 * (hi - lo), "motor avg"        # idle/spool floor + margin
     return None, None, None
+
+
+def _thr_percent(thr: np.ndarray, src: str) -> np.ndarray:
+    """Map a raw throttle series to 0–100 %. rcCommand[3] is the 1000–2000 µs band; the motor-avg
+    fallback is normalised to its own 2nd–98th percentile span (DShot scale has no fixed range)."""
+    if src == "rcCommand[3]":
+        return np.clip((thr - 1000.0) / 10.0, 0.0, 100.0)
+    lo, hi = float(np.percentile(thr, 2)), float(np.percentile(thr, 98))
+    return np.clip(100.0 * (thr - lo) / max(hi - lo, 1e-6), 0.0, 100.0)
 
 
 def _throttle_map(df: pd.DataFrame, fs: float, axis_idx: int, fmin: float, fmax: float,
@@ -601,6 +640,250 @@ NOISE_FLOOR_PCT = 20
 RESIDUAL_OK_DB = 6.0
 
 
+# --- Filter-quality score (universal 0..1) ----------------------------------
+# f_split is where the raw gyro spectrum emerges above its own "natural
+# background" (motion + colored noise), found by an iterative sigma-clipped
+# log-log power-law fit; the score is the fraction of in-band (0..f_split) raw
+# power that survives filtering. ~0.5 = sweet spot, ->1 under-filtered, ->0
+# over-filtered (the filter is eating the band it should preserve).
+FQ_FMIN_FIT = 40.0       # Hz, fit/detection floor — above the low-freq motion & propwash
+                         # knee a single power law cannot model (else the steep motion
+                         # content drags the fit down and the whole low band "emerges")
+FQ_FMIN_PRES = 20.0      # Hz, lower bound of the preservation band (skip the DC pedestal)
+FQ_SIGMA = 2.0           # clip raw points emerging > this many sigma above the fit
+FQ_RATIO_THRESH = 1.5    # raw/fit emergence ratio that marks the signal "rising"
+FQ_CONSEC = 10           # consecutive points above the ratio to call it f_split
+FQ_SMOOTH = 10           # moving-average window on the ratio before detection
+FQ_MAX_ITER = 50         # sigma-clip iteration cap
+FQ_ALPHA_TOL = 0.01      # converged when |Δα| < this * |α|
+FQ_ALIAS_GUARD_HZ = 50.0  # exclude [fs/2 - this .. fs/2] (aliasing zone) from the fit
+FQ_PEAK_WIN_BINS = 10    # ±bins for the local-median/σ motor-peak detector
+FQ_PEAK_SIGMA = 3.0      # drop a bin from the fit if raw > local_median + this·σ
+FQ_HF_FLOOR_MIN = 100.0  # Hz, lower bound of the HF broadband-floor estimate
+FQ_K_HF = 5.0            # emergence must also sit > this · HF floor (not just > fit)
+FQ_KNEE_GRID = 25        # candidate breakpoints for the two-slope (broken power-law) fit
+FQ_SLOPE_TOL = 0.1       # both segment slopes must be ≤ this (a PSD background falls/flat,
+                         # never rises with frequency) — rejects degenerate fits
+
+
+def _broken_powerlaw_fit(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
+    """Continuous two-segment linear fit in log-log space (a broken power law).
+
+    A single power law cannot model the gyro spectrum's knee: a steep low-freq
+    motion/propwash rolloff that flattens into the HF noise plateau. Modelling the
+    knee keeps the background from sitting under the motion tail (which would make
+    the whole low band spuriously 'emerge'). Returns (b, s1, s2, xb): intercept,
+    low-freq slope, HF slope, breakpoint (in log10 Hz). Among grid breakpoints, the
+    least-squares best whose *both* slopes are non-rising (≤ FQ_SLOPE_TOL) is kept —
+    a rising background is unphysical and signals an overfit. Continuity is built in.
+    """
+    n = x.size
+    lo, hi = np.quantile(x, 0.15), np.quantile(x, 0.85)
+    best = best_valid = None
+    for xb in np.linspace(lo, hi, FQ_KNEE_GRID):
+        h = np.maximum(x - xb, 0.0)                 # y = b + s1*x + (s2-s1)*relu(x-xb)
+        a = np.column_stack([np.ones(n), x, h])
+        coef, *_ = np.linalg.lstsq(a, y, rcond=None)
+        ssr = float(np.sum((y - a @ coef) ** 2))
+        s1, s2 = float(coef[1]), float(coef[1] + coef[2])
+        cand = (ssr, float(coef[0]), s1, s2, float(xb))
+        if best is None or ssr < best[0]:
+            best = cand
+        if s1 <= FQ_SLOPE_TOL and s2 <= FQ_SLOPE_TOL and (best_valid is None or ssr < best_valid[0]):
+            best_valid = cand
+    _, b, s1, s2, xb = best_valid if best_valid is not None else best
+    return b, s1, s2, xb
+
+
+def _bp_model(x: np.ndarray, b: float, s1: float, s2: float, xb: float) -> np.ndarray:
+    return b + s1 * x + (s2 - s1) * np.maximum(x - xb, 0.0)
+
+
+def _fq_reco(score: float) -> str:
+    """Map a filter-quality score [0..1] to a recommendation code (FR/EN in strings)."""
+    if score >= 0.90:
+        return "decrease_strong"
+    if score >= 0.70:
+        return "decrease_slight"
+    if score >= 0.50:
+        return "sweet_spot"
+    if score >= 0.30:
+        return "increase_slight"
+    return "increase_strong"
+
+
+def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
+                    fs: float) -> dict | None:
+    """Universal filter-quality score in [0,1] from raw vs filtered gyro PSD (linear).
+
+    Fits a power law (PSD ∝ f^-α) to the raw spectrum in log-log, iteratively
+    sigma-clipping points that emerge *above* the fit, so the fit converges on
+    the signal's natural background. ``f_split`` is the first frequency where the
+    raw/fit ratio stays above FQ_RATIO_THRESH for FQ_CONSEC consecutive points;
+    the score is ∫filt / ∫raw over 0..f_split. Returns None if the fit is not
+    feasible. Falls back to fs/4 (with ``fallback=True``) when f_split is out of
+    a plausible 20..fs/3 range.
+    """
+    f = np.asarray(f, float)
+    raw = np.asarray(raw_lin, float)
+    filt = np.asarray(filt_lin, float)
+
+    base_sel = (f >= FQ_FMIN_FIT) & (raw > 0)
+    if int(base_sel.sum()) < 20:
+        return None
+
+    # --- pre-fit masking (fit + f_split detection only; the A/P band integrals
+    # below keep using the full arrays). Both masks keep the power-law fit and
+    # f_split off content that would bias them:
+    #   1) the aliasing zone just below Nyquist,
+    #   2) sharp motor-harmonic peaks (a narrow spike can drag f_split onto itself
+    #      and inflate the clip σ); wide humps survive (local median tracks them).
+    nyq = fs / 2.0
+    mask = base_sel & (f < nyq - FQ_ALIAS_GUARD_HZ)
+    ki = np.where(mask)[0]
+    if ki.size:
+        rsub = raw[ki]
+        w = FQ_PEAK_WIN_BINS
+        peak = np.zeros(rsub.size, dtype=bool)
+        for j in range(rsub.size):
+            seg = rsub[max(0, j - w): j + w + 1]
+            sg = float(seg.std())
+            if sg > 0.0 and rsub[j] > float(np.median(seg)) + FQ_PEAK_SIGMA * sg:
+                peak[j] = True
+        mask[ki[peak]] = False
+    # bins dropped from the fit relative to the plain [5Hz..) selection (alias + peaks)
+    masked_bins_count = int(base_sel.sum() - mask.sum())
+
+    fm = f[mask]
+    rm = raw[mask]
+
+    alpha_hf = alpha_lf = 0.0
+    f_knee = 0.0
+    f_split: float | None = None
+    if fm.size >= 20:
+        x = np.log10(fm)
+        y = np.log10(rm)
+        keep = np.ones(x.shape, dtype=bool)
+        b = s1 = s2 = xb = 0.0
+        s2_prev: float | None = None
+        for _ in range(FQ_MAX_ITER):
+            if int(keep.sum()) < 8:
+                break
+            b, s1, s2, xb = _broken_powerlaw_fit(x[keep], y[keep])
+            resid = y - _bp_model(x, b, s1, s2, xb)
+            sigma = float(resid[keep].std())
+            if sigma <= 0.0:
+                break
+            new_keep = resid <= FQ_SIGMA * sigma     # drop points emerging ABOVE the fit
+            if s2_prev is not None and abs(s2 - s2_prev) < FQ_ALPHA_TOL * max(abs(s2_prev), 1e-9):
+                break
+            s2_prev = s2
+            if np.array_equal(new_keep, keep):
+                break
+            keep = new_keep
+
+        alpha_hf, alpha_lf, f_knee = -s2, -s1, float(10.0 ** xb)
+        # two-slope background, then the emergence ratio — on the masked arrays
+        fit_m = 10.0 ** _bp_model(x, b, s1, s2, xb)
+        ratio = rm / np.maximum(fit_m, 1e-30)
+        if FQ_SMOOTH > 1:
+            ratio = np.convolve(ratio, np.ones(FQ_SMOOTH) / FQ_SMOOTH, mode="same")
+        # HF broadband floor: emergence must rise above both the power-law fit AND a
+        # multiple of this floor, so the low-freq motion tail (above the fit but below
+        # the real motor noise) can no longer pin f_split to the fit-domain start.
+        hf = (fm >= FQ_HF_FLOOR_MIN) & (fm <= nyq - FQ_ALIAS_GUARD_HZ)
+        hf_floor = float(np.median(rm[hf])) if hf.any() else 0.0
+        logger.debug("filter_quality: hf_floor=%.4g (over %d bins)", hf_floor, int(hf.sum()))
+        run = 0
+        for i in range(fm.size):
+            if (fm[i] >= FQ_FMIN_FIT and ratio[i] > FQ_RATIO_THRESH
+                    and rm[i] > hf_floor * FQ_K_HF):
+                run += 1
+                if run >= FQ_CONSEC:
+                    f_split = float(fm[i - FQ_CONSEC + 1])
+                    break
+            else:
+                run = 0
+
+    fallback = False
+    if f_split is None or f_split < 20.0 or f_split > fs / 3.0:
+        f_split = fs / 4.0
+        fallback = True
+
+    # Hybrid score. ∫filt/∫raw over the whole useful band [0..f_split] is invalid:
+    # the f^-α pedestal dominates and no real filter touches it, so it pegs at ~1.
+    # Split into two reference-independent components instead:
+    #   A (attenuation)  over [f_split..fmax]: does the filter kill the noise?
+    #   P (preservation)  over [f_low..f_split]: does it spare the useful signal?
+    # The harmonic mean punishes either one failing.
+    fmax = float(f[-1])
+    f_low = FQ_FMIN_PRES                       # exclude the DC pedestal from P
+
+    def _ratio(lo, hi):
+        b = (f >= lo) & (f <= hi)
+        if int(b.sum()) < 3:
+            return None
+        pr = float(trapezoid(raw[b], f[b]))
+        if pr <= 0.0:
+            return None
+        return float(trapezoid(filt[b], f[b])) / pr
+
+    r_noise = _ratio(f_split, fmax)            # filt/raw in the noise band
+    r_signal = _ratio(f_low, f_split)          # filt/raw in the signal band
+    if r_noise is None or r_signal is None:
+        return None
+    A = min(max(1.0 - r_noise, 0.0), 1.0)      # 1 = perfect attenuation, 0 = filter does nothing
+    P = min(max(r_signal, 0.0), 1.0)           # 1 = signal untouched, 0 = signal crushed
+    score = (2.0 * A * P / (A + P)) if (A + P) > 0.0 else 0.0
+    out = {
+        "score": round(score, 3),
+        "score_attenuation": round(A, 3),
+        "score_preservation": round(P, 3),
+        "f_split_hz": round(f_split, 1),
+        "alpha": round(alpha_hf, 2),            # HF (noise-plateau) slope — the meaningful one
+        "alpha_lf": round(alpha_lf, 2),         # low-freq (motion) slope
+        "f_knee_hz": round(f_knee, 1),          # breakpoint between the two slopes
+        "fallback": fallback,
+        "masked_bins_count": masked_bins_count,
+    }
+    # On fallback, f_split is arbitrary (fs/4, no real noise emergence) so the band split
+    # is meaningless — keep A/P/score but withhold the verdict. Not a bug: a clean log with
+    # no detectable emergence often just means the drone is well tuned / well filtered.
+    if fallback:
+        out["confidence"] = "low"
+        out["recommendation"] = "insufficient_data"
+        out["reason"] = "f_split_fallback: no noise emergence detected"
+    else:
+        out["confidence"] = "high"
+        out["recommendation"] = _fq_reco(score)
+    return out
+
+
+def _filter_quality_block(noise: dict) -> dict:
+    """Collect per-axis filter_quality from the noise spectrum + a mean-of-axes summary."""
+    axes = (noise or {}).get("axes") or {}
+    per = {a: d["filter_quality"] for a, d in axes.items() if d.get("filter_quality")}
+    if not per:
+        return {}
+    mean_score = round(float(np.mean([v["score"] for v in per.values()])), 3)
+    # The mean is trustworthy as long as at least one axis had a real emergence;
+    # only when every axis fell back is the verdict withheld.
+    any_high = any(v.get("confidence") == "high" for v in per.values())
+    mean = {
+        "score": mean_score,
+        "score_attenuation": round(float(np.mean([v["score_attenuation"] for v in per.values()])), 3),
+        "score_preservation": round(float(np.mean([v["score_preservation"] for v in per.values()])), 3),
+        "f_split_hz": round(float(np.median([v["f_split_hz"] for v in per.values()])), 1),
+        "confidence": "high" if any_high else "low",
+    }
+    if any_high:
+        mean["recommendation"] = _fq_reco(mean_score)
+    else:
+        mean["recommendation"] = "insufficient_data"
+        mean["reason"] = "f_split_fallback: no noise emergence detected on any axis"
+    return {"axes": per, "mean": mean}
+
+
 def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.ndarray,
                     fmin: float = 30.0, fmax: float | None = None) -> dict:
     """Gyro PSD (dB) over a chirp-free window: raw (gyroUnfilt) vs filtered (gyroADC).
@@ -627,11 +910,16 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
     def psd(col):
         sig = sp_signal.detrend(df.loc[m, col].to_numpy(float))
         f, pxx = sp_signal.welch(sig, fs=fs, nperseg=min(nperseg, len(sig)), window="hann")
-        return f, 10.0 * np.log10(pxx + 1e-10)
+        return f, pxx
 
     has_unfilt = ucol in df.columns
-    f, raw = psd(ucol if has_unfilt else gcol)
-    _, filt = psd(gcol)
+    f, raw_lin = psd(ucol if has_unfilt else gcol)
+    _, filt_lin = psd(gcol)
+    # Universal filter-quality score needs the full linear PSD down to ~5 Hz for the
+    # power-law fit, so compute it before the dB conversion and the fmin crop below.
+    fq = _filter_quality(f, raw_lin, filt_lin, fs) if has_unfilt else None
+    raw = 10.0 * np.log10(raw_lin + 1e-10)
+    filt = 10.0 * np.log10(filt_lin + 1e-10)
     sel = (f >= fmin) & (f <= fmax)
     f, raw, filt = f[sel], raw[sel], filt[sel]
     if f.size < 8:
@@ -663,7 +951,82 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
         "raw_db": [round(float(v), 1) for v in raw[::step]],
         "filt_db": [round(float(v), 1) for v in filt[::step]],
         "peaks": peaks,
+        **({"filter_quality": fq} if fq else {}),
     }
+
+
+def _band_floor_peaks(f: np.ndarray, db: np.ndarray, fmin: float, fmax: float) -> dict:
+    """Crop a PSD (dB) to [fmin, fmax], re-reference to its HF broadband floor (0 dB =
+    floor) and pick the peaks above it. Shared by the single-signal D-term / motor panels;
+    the gyro keeps its own raw-vs-filtered path in `_noise_spectrum`. Returns {} if too short."""
+    sel = (f >= fmin) & (f <= fmax)
+    f, db = f[sel], db[sel]
+    if f.size < 8:
+        return {}
+    hf = f >= 70.0
+    floor = float(np.percentile(db[hf], NOISE_FLOOR_PCT)) if hf.sum() >= 5 else float(np.median(db))
+    db = db - floor
+    peaks = []
+    if hf.sum() > 5:
+        fb, rb = f[hf], db[hf]
+        dfd = float(np.median(np.diff(fb))) or 1.0
+        idx, props = sp_signal.find_peaks(rb, prominence=NOISE_PEAK_PROM_DB, distance=max(1, int(15.0 / dfd)))
+        for k, i in enumerate(idx):
+            peaks.append({"freq_hz": round(float(fb[i]), 0),
+                          "above_floor_db": round(float(rb[i]), 1),
+                          "prom_db": round(float(props["prominences"][k]), 1)})
+        peaks.sort(key=lambda p: p["above_floor_db"], reverse=True)
+        peaks = peaks[:6]
+    step = max(1, len(f) // 400)
+    return {"freqs": [round(float(v), 1) for v in f[::step]],
+            "db": [round(float(v), 1) for v in db[::step]], "peaks": peaks}
+
+
+def _quiet_nperseg(n_quiet: int) -> int:
+    return max(1024, int(min(4096, 2 ** int(np.log2(n_quiet)))))
+
+
+def _dterm_motor_spectrum(df: pd.DataFrame, fs: float, quiet_for, quiet_primary: np.ndarray,
+                          fmin: float = 30.0, fmax: float | None = None) -> dict:
+    """D-term (axisD) PSD per axis + a combined motor-output PSD, over the chirp-free window.
+
+    The D-term is the PID path that dominates the motor command at high frequency, so a sharp
+    HF peak here is the oscillation that saturates the ESCs and heats the motors — the gyro
+    spectrum can look filtered-clean while the D-term/motor still ring. The motor curve averages
+    the per-motor PSDs (linear power): uncorrelated noise averages down, a shared oscillation
+    survives. Present only when D-term / motor channels were logged.
+    """
+    fmax = fmax or fs / 2.0 * 0.98
+    out: dict = {"axes": {}}
+
+    for i, axis in enumerate(AXES):
+        col = f"axisD[{i}]"
+        if col not in df.columns:
+            continue
+        m = np.asarray(quiet_for(i))
+        if int(m.sum()) < 2048:
+            continue
+        nperseg = _quiet_nperseg(int(m.sum()))
+        sig = sp_signal.detrend(df.loc[m, col].to_numpy(float))
+        f, pxx = sp_signal.welch(sig, fs=fs, nperseg=min(nperseg, len(sig)), window="hann")
+        d = _band_floor_peaks(f, 10.0 * np.log10(pxx + 1e-10), fmin, fmax)
+        if d:
+            out["axes"][axis] = d
+
+    mcols = [f"motor[{i}]" for i in range(8) if f"motor[{i}]" in df.columns]
+    m = np.asarray(quiet_primary)
+    if mcols and int(m.sum()) >= 2048:
+        nperseg = _quiet_nperseg(int(m.sum()))
+        pacc, f = None, None
+        for c in mcols:
+            sig = sp_signal.detrend(df.loc[m, c].to_numpy(float))
+            f, pxx = sp_signal.welch(sig, fs=fs, nperseg=min(nperseg, len(sig)), window="hann")
+            pacc = pxx if pacc is None else pacc + pxx
+        mt = _band_floor_peaks(f, 10.0 * np.log10(pacc / len(mcols) + 1e-10), fmin, fmax)
+        if mt:
+            out["motor"] = mt
+
+    return out if out["axes"] or out.get("motor") else {}
 
 
 def _worst_residual_db(noise: dict) -> float | None:
@@ -882,13 +1245,15 @@ def _frf_pack(x, y, sp_vals, fs, nperseg, a_fmin, a_fmax):
     freqs, gain, phase, coh, H = _frf(x, y, fs, nperseg)
     fco, margin, m_unc = _phase_margin(freqs, gain, phase, coh, a_fmin, a_fmax)
     f_ms, ms, pm_ms = _sensitivity_peak(freqs, H, coh, a_fmin, a_fmax)
+    f_mt, mt = _comp_sensitivity_peak(freqs, H, coh, a_fmin, a_fmax)
     step = {}
     if sp_vals is not None:
         sb = min(a_fmax, max(120.0, 6.0 * fco)) if fco else min(a_fmax, 150.0)
         step = _step_response(sp_vals, y, fs, band_fmax=sb)
     return {"freqs": freqs, "gain": gain, "phase": phase, "coh": coh, "H": H,
             "fco": fco, "margin": margin, "m_unc": m_unc,
-            "f_ms": f_ms, "ms": ms, "pm_ms": pm_ms, "step": step}
+            "f_ms": f_ms, "ms": ms, "pm_ms": pm_ms,
+            "f_mt": f_mt, "mt": mt, "step": step}
 
 
 def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT_FMAX,
@@ -918,6 +1283,9 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
     primary_axis_idx = None
     primary_n = 0
     sweep_windows: dict = {}   # axis index -> [(start, end_exclusive), ...] for the spectrogram merge
+    # throttle as 0–100 % over the whole log, for the per-sweep Ms-vs-throttle mini (TPA cue)
+    _thr_all, _, _thr_src = _throttle_series(df)
+    thr_pct_all = _thr_percent(_thr_all, _thr_src) if _thr_all is not None else None
 
     for i, axis in enumerate(AXES):
         if axes_filter and axis not in axes_filter:
@@ -960,6 +1328,7 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
         sweeps = _split_sweeps(axis_active, fs)
         sweep_windows[i] = sweeps
         packs = []
+        sweep_thr = []   # mean throttle (%) per sweep, aligned with packs
         if len(sweeps) >= 2:
             for s, e in sweeps:
                 sm = np.zeros(len(df), dtype=bool); sm[s:e] = axis_active[s:e]
@@ -969,10 +1338,26 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
                 ys = df.loc[sm, gcol].to_numpy(float)
                 sps = df.loc[sm, spcol].to_numpy(float) if spcol in df.columns else None
                 packs.append(_frf_pack(xs, ys, sps, fs, nperseg, a_fmin, a_fmax))
+                sweep_thr.append(float(np.mean(thr_pct_all[sm])) if thr_pct_all is not None else None)
             if packs:   # drop any short fragment whose Welch grid doesn't match the others
                 gl = max(len(p["freqs"]) for p in packs)
-                packs = [p for p in packs if len(p["freqs"]) == gl]
+                keep = [k for k, p in enumerate(packs) if len(p["freqs"]) == gl]
+                packs = [packs[k] for k in keep]
+                sweep_thr = [sweep_thr[k] for k in keep]
         multi = len(packs) >= 2
+
+        # Ms-vs-throttle: each repeat sweep is a full sweep flown at its own throttle, so its Ms is
+        # confound-free (unlike slicing one rising sweep, where throttle tracks frequency). If Ms climbs
+        # from low to high throttle, the loop peaks under power (propwash zone) -> raise TPA up top.
+        ms_throttle = []
+        if multi and all(t is not None for t in sweep_thr):
+            for p, t in zip(packs, sweep_thr):
+                if p["ms"] is not None:
+                    ms_throttle.append({"throttle_pct": round(t, 0), "ms": p["ms"], "f_ms_hz": p["f_ms"]})
+            ms_throttle.sort(key=lambda r: r["throttle_pct"])
+            # only meaningful if the sweeps actually span a throttle range (≥8 % low→high)
+            if len(ms_throttle) < 2 or ms_throttle[-1]["throttle_pct"] - ms_throttle[0]["throttle_pct"] < 8:
+                ms_throttle = []
 
         band_fields: dict = {}
         if multi:
@@ -986,6 +1371,8 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
             f_ms, fms_lo, fms_hi = _med_range([p["f_ms"] for p in packs])
             ms, ms_lo, ms_hi = _med_range([p["ms"] for p in packs])
             pm_ms, pmg_lo, pmg_hi = _med_range([p["pm_ms"] for p in packs])
+            f_mt, fmt_lo, fmt_hi = _med_range([p["f_mt"] for p in packs])
+            mt, mt_lo, mt_hi = _med_range([p["mt"] for p in packs])
             fb, gb, pb, cb, glo, ghi, plo, phi, clo, chi = _downsample(
                 freqs, gain_db, phase_deg, coh, g_lo, g_hi, p_lo, p_hi, c_lo, c_hi,
                 fmin=a_fmin, fmax=a_fmax)
@@ -999,12 +1386,15 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
                 "ms_range": [ms_lo, ms_hi],
                 "f_ms_range": [fms_lo, fms_hi],
                 "pm_guaranteed_range": [pmg_lo, pmg_hi],
+                "mt_range": [mt_lo, mt_hi],
+                "f_mt_range": [fmt_lo, fmt_hi],
             }
             step = _aggregate_step([p["step"] for p in packs], band_fields)
         else:
             freqs, gain_db, phase_deg, coh, H = _frf(x, y, fs, nperseg)
             fco, margin, m_unc = _phase_margin(freqs, gain_db, phase_deg, coh, a_fmin, a_fmax)
             f_ms, ms, pm_ms = _sensitivity_peak(freqs, H, coh, a_fmin, a_fmax)
+            f_mt, mt = _comp_sensitivity_peak(freqs, H, coh, a_fmin, a_fmax)
             # Step response from the calibrated setpoint -> gyro (time-domain companion to the Bode).
             step = {}
             if spcol in df.columns:
@@ -1030,9 +1420,12 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
             "ms": ms,
             "f_ms_hz": f_ms,
             "pm_guaranteed_deg": pm_ms,
+            "mt": mt,
+            "f_mt_hz": f_mt,
             "step": step,
             "diagnosis": _diagnose(peaks, (fco, margin, m_unc), a_fmin, a_fmax),
             "step_diagnosis": _step_diagnosis(step.get("metrics", {})) if step else [],
+            **({"ms_throttle": ms_throttle} if ms_throttle else {}),
             **band_fields,
         }
 
@@ -1040,21 +1433,44 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
     noise = {}
     if primary_axis_idx is not None:
         throttle_map = _throttle_map(df, fs, primary_axis_idx, fmin, fmax)
-        # Noise PSD over the chirp-free window for this axis (when it is NOT being excited).
-        if labels is not None:
-            quiet = labels != primary_axis_idx
-        elif active is not None:
-            quiet = ~active
-        else:
-            quiet = np.ones(len(df), dtype=bool)
+        # Noise PSD over each axis' chirp-free window (when that axis is NOT being excited),
+        # so the renderer's per-axis chips can show roll/pitch/yaw, not just the swept axis.
         thr, idle, _ = _throttle_series(df)
-        if thr is not None:
-            quiet = quiet & (thr > idle)
-        noise = _noise_spectrum(df, fs, primary_axis_idx, quiet, fmin=30.0, fmax=fmax)
-        if noise and motor_poles:
-            mh = _motor_harmonics(df, quiet, motor_poles, float(noise["freqs"][-1]))
-            if mh:
-                noise["motor"] = mh
+
+        def quiet_for(i):
+            if labels is not None:
+                q = labels != i
+            elif active is not None:
+                q = ~active
+            else:
+                q = np.ones(len(df), dtype=bool)
+            return q & (thr > idle) if thr is not None else q
+
+        noise_axes = {}
+        for i, axis in enumerate(AXES):
+            if GYRO_COL.format(i) not in df.columns:
+                continue
+            n = _noise_spectrum(df, fs, i, quiet_for(i), fmin=30.0, fmax=fmax)
+            if n:
+                noise_axes[axis] = n
+
+        # Top-level noise keeps the primary axis' shape (back-compat for existing consumers);
+        # the full per-axis set rides alongside under "axes". Shallow-copy so the primary entry
+        # inside "axes" is not the same object as the parent (that would be a circular ref on dump).
+        prim = noise_axes.get(AXES[primary_axis_idx])
+        noise = dict(prim) if prim else {}
+        if noise:
+            noise["axes"] = noise_axes
+            quiet_primary = quiet_for(primary_axis_idx)
+            if motor_poles:
+                mh = _motor_harmonics(df, quiet_primary, motor_poles, float(noise["freqs"][-1]))
+                if mh:
+                    noise["motor"] = mh
+            # D-term / motor-output PSD: the HF oscillation that heats the ESCs (feature: shown
+            # below the gyro spectrum when the D-term / motor channels were logged).
+            dm = _dterm_motor_spectrum(df, fs, quiet_for, quiet_primary, fmin=30.0, fmax=fmax)
+            if dm:
+                noise["dterm"] = dm
 
     # Spectrogram of the primary axis over its chirp window -> the rising sweep. With several
     # sweeps on that axis we median them (cleaner ridge); a single sweep keeps the original path
@@ -1324,6 +1740,7 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
         "tune_score": _tune_score(results),
         "throttle_map": throttle_map,
         "noise_spectrum": noise,
+        "filter_quality": _filter_quality_block(noise),
         "spectrogram": spectro,
         "synthesis": _synthesis(results, noise, config, throttle_max),
         "filter_suggestions": _filter_suggestions(throttle_map, config) if config else [],
