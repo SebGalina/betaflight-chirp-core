@@ -10,11 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Analysis: `filter_quality` block per axis — harmonic-mean score (attenuation × preservation),
   `f_split_hz` emergence frequency, power-law slopes `alpha`/`alpha_lf`, `f_knee_hz` breakpoint,
-  and a plain-language `recommendation`/`confidence`/`reason` verdict. Exposed in `pass["filter_quality"]`
-  and surfaced in the HTML report as a dedicated block.
+  and a plain-language `recommendation`/`confidence`/`reason` verdict. Exposed in `pass["filter_quality"]`.
 - Analysis: `mt` (peak complementary sensitivity max|T|) and `f_mt_hz` per axis — closed-loop
   resonance indicator and delay-robustness complement to `ms`. Added to `pass["axes"][ax]`
   and to `tune_score` sub-scores.
+- Renderer: filter-quality gauge block between the throttle map and the noise PSD. Full-width
+  canvas with one row per axis: three horizontal bars (Attenuation · Preservation · Global score)
+  with red/amber/green zone backgrounds and threshold guide lines at 0.6 and 0.8. The Score bar
+  splits at 0.8 into solid green fill + diagonal amber hatch for the over-specified excess, with
+  a ← arrow when the recommendation is `decrease_*`. Mean row with translated recommendation line.
+  Glossary entry + FR/EN strings for all new keys.
 
 ## [0.1.8] - 2026-06-17
 
