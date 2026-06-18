@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-06-18
+
+### Added
+- Analysis: `filter_quality` block per axis — harmonic-mean score (attenuation × preservation),
+  `f_split_hz` emergence frequency, power-law slopes `alpha`/`alpha_lf`, `f_knee_hz` breakpoint,
+  and a plain-language `recommendation`/`confidence`/`reason` verdict. Exposed in `pass["filter_quality"]`
+  and surfaced in the HTML report as a dedicated block.
+- Analysis: `mt` (peak complementary sensitivity max|T|) and `f_mt_hz` per axis — closed-loop
+  resonance indicator and delay-robustness complement to `ms`. Added to `pass["axes"][ax]`
+  and to `tune_score` sub-scores.
+
 ## [0.1.8] - 2026-06-17
 
 ### Changed
