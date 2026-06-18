@@ -44,6 +44,7 @@ def parse_header_config(raw: bytes) -> dict:
         if p:
             cfg["pids"][axis] = p
     cfg["d_max"] = ints("d_max", 3)
+    cfg["ff"] = ints("ff_weight", 3)   # per-axis feedforward gain (roll, pitch, yaw); 0 = off
     g1 = ints("gyro_lpf1_dyn_hz")
     cfg["gyro_lpf1"] = {"dyn": g1, "static": i1("gyro_lpf1_static_hz"),
                         "type": _LPF_TYPES.get(h.get("gyro_lpf1_type"), h.get("gyro_lpf1_type"))}
@@ -76,6 +77,8 @@ def config_fields(cfg: dict) -> list[tuple]:
             out.append((f"{ax} P/I/D", "/".join(map(str, p))))
     if cfg.get("d_max"):
         out.append(("D_max", "/".join(map(str, cfg["d_max"]))))
+    if cfg.get("ff") and any(cfg["ff"]):
+        out.append(("FF (R/P/Y)", "/".join(map(str, cfg["ff"]))))
 
     def lpf(key, lbl):
         d = cfg.get(key) or {}
