@@ -273,16 +273,18 @@ GLOSSARY = {
     },
     "filter_quality": {
         "fr": "Qualité du filtrage — deux angles complémentaires. "
-              "Atténuation (A) : dans quelle mesure le filtre supprime le bruit haute fréquence au-dessus de f_split ; "
-              "sans ça les ESC chauffent. Préservation (P) : dans quelle mesure le signal utile (< f_split) est "
-              "conservé — trop de filtre ajoute du délai et rogne la marge de phase. Le Score est leur moyenne "
-              "harmonique 2AP/(A+P), qui pénalise le maillon le plus faible. "
-              "1.0 = filtrage parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
+              "Atténuation (A) : de la part de bruit qui émerge en pics au-dessus du plancher, combien le filtre en "
+              "supprime ; A bas = bruit qui survit (sous-filtré, risque chauffe ESC). Préservation (P) : le coût de "
+              "phase du filtre dans la bande de contrôle (retard de groupe ajouté) ; P bas = trop de filtre, délai "
+              "excessif (sur-filtré). Le Score est leur moyenne harmonique 2AP/(A+P). A ou P peut être « n/a » "
+              "quand rien n'émerge ou que le coût de phase n'est pas mesurable. "
+              "1.0 = parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
         "en": "Filter quality — two complementary angles. "
-              "Attenuation (A): how well the filter suppresses HF noise above f_split — without this ESCs overheat. "
-              "Preservation (P): how well the useful signal (< f_split) is retained — over-filtering adds delay and "
-              "eats phase margin. Score is their harmonic mean 2AP/(A+P), penalising the weakest link. "
-              "1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
+              "Attenuation (A): of the noise that emerges as peaks above the floor, how much the filter removes; "
+              "low A = noise survives (under-filtered, ESC-heat risk). Preservation (P): the filter's phase cost in "
+              "the control band (added group delay); low P = too much filter, excess delay (over-filtered). Score is "
+              "their harmonic mean 2AP/(A+P). A or P may read 'n/a' when nothing emerges or the phase cost isn't "
+              "measurable. 1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
     },
     "feedforward": {
         "fr": "Feedforward (FF) : un terme qui pousse la commande directement à partir du mouvement du "
@@ -378,14 +380,22 @@ STRINGS = {
         "ms_thr_t": "Ms / gaz",
         "fq_h": "Qualité du filtrage",
         "fq_atten": "Atténuation", "fq_pres": "Préservation", "fq_score": "Score global", "fq_mean": "moy.",
-        "fq_cap": "Atténuation = suppression bruit HF · Préservation = signal utile conservé · "
-                  "Score = moyenne harmonique (pénalise le maillon faible) · vert ≥ 0.8 · ambre 0.6–0.8 · rouge < 0.6",
-        "fq_rec_decrease_strong": "Réduire D-LPF (sur-filtré, perte de signal et délai excessif)",
-        "fq_rec_decrease_slight": "Réduire légèrement D-LPF",
+        "fq_cap": "Atténuation = bruit émergent supprimé · Préservation = coût de phase faible (peu de retard) · "
+                  "Score = moyenne harmonique (pénalise le maillon faible) · vert ≥ 0.8 · ambre 0.6–0.8 · rouge < 0.6 · "
+                  "▲ renforcer · ▼ alléger · ● équilibré",
+        "fq_lag": "retard de phase",
+        "fq_band_ctrl": "bande contrôle ≤",
+        "fq_band_corner": "corner LPF",
+        "fq_resid_warn": "pic résiduel au-dessus du plancher :",
+        "fq_resid_ok": "aucun pic résiduel au-dessus du plancher",
+        "fq_rec_decrease_strong": "Sur-filtré — alléger le filtrage (monter les cutoffs LPF) pour réduire le retard de phase",
+        "fq_rec_decrease_slight": "Légèrement sur-filtré — alléger un peu le filtrage",
         "fq_rec_sweet_spot": "Filtrage équilibré",
-        "fq_rec_increase_slight": "Augmenter légèrement D-LPF",
-        "fq_rec_increase_strong": "Augmenter D-LPF (bruit HF excessif, risque de chauffe moteur)",
+        "fq_rec_increase_slight": "Légèrement sous-filtré — renforcer un peu le filtrage (bruit HF résiduel)",
+        "fq_rec_increase_strong": "Sous-filtré — renforcer le filtrage (bruit HF résiduel, risque de chauffe moteur)",
         "fq_rec_insufficient_data": "Données insuffisantes (émergence de bruit non détectée)",
+        "fq_rec_loosen_candidate": "Propre & faible retard — marge pour alléger encore le filtrage",
+        "fq_rec_na_motion_dominated": "n/a — spectre dominé par le mouvement, filtrage HF non mesurable",
         "step2_h": "PID",
         "sanity_h": "Contrôle des mesures — balayage du chirp",
         "spectro_cap": "{sg} — gyro {ax} pendant le sweep. La diagonale qui monte = le chirp ; les bandes "
@@ -473,14 +483,22 @@ STRINGS = {
         "ms_thr_t": "Ms / throttle",
         "fq_h": "Filter Quality",
         "fq_atten": "Attenuation", "fq_pres": "Preservation", "fq_score": "Global score", "fq_mean": "mean",
-        "fq_cap": "Attenuation = HF noise suppression · Preservation = useful signal retained · "
-                  "Score = harmonic mean (penalises weakest link) · green ≥ 0.8 · amber 0.6–0.8 · red < 0.6",
-        "fq_rec_decrease_strong": "Reduce D-LPF cutoff (over-filtered — signal loss and excess delay)",
-        "fq_rec_decrease_slight": "Slightly reduce D-LPF cutoff",
+        "fq_cap": "Attenuation = emergent noise removed · Preservation = low phase cost (little delay) · "
+                  "Score = harmonic mean (penalises weakest link) · green ≥ 0.8 · amber 0.6–0.8 · red < 0.6 · "
+                  "▲ tighten · ▼ loosen · ● balanced",
+        "fq_lag": "phase lag",
+        "fq_band_ctrl": "control band ≤",
+        "fq_band_corner": "LPF corner",
+        "fq_resid_warn": "residual peak above the floor:",
+        "fq_resid_ok": "no residual peak above the floor",
+        "fq_rec_decrease_strong": "Over-filtered — loosen filtering (raise LPF cutoffs) to cut excess phase delay",
+        "fq_rec_decrease_slight": "Slightly over-filtered — loosen filtering a little",
         "fq_rec_sweet_spot": "Filtering well balanced",
-        "fq_rec_increase_slight": "Slightly increase D-LPF cutoff",
-        "fq_rec_increase_strong": "Increase D-LPF cutoff (excessive HF noise — risk of motor heat)",
+        "fq_rec_increase_slight": "Slightly under-filtered — tighten filtering a little (some HF noise survives)",
+        "fq_rec_increase_strong": "Under-filtered — tighten filtering (HF noise survives — risk of motor heat)",
         "fq_rec_insufficient_data": "Insufficient data (no noise emergence detected)",
+        "fq_rec_loosen_candidate": "Clean & low-lag — room to loosen filtering further",
+        "fq_rec_na_motion_dominated": "n/a — spectrum dominated by motion, HF filtering not measurable",
         "step2_h": "PID",
         "sanity_h": "Measurement check — chirp sweep",
         "spectro_cap": "{sg} — {ax} gyro during the sweep. The rising diagonal = the chirp; horizontal "

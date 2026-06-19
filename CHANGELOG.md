@@ -5,6 +5,47 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-19
+
+### Changed
+- Analysis: filter-quality rework so the score reflects the *real* cost/benefit of filtering
+  instead of pegging on power ratios. Band split is now anchored on the actual gyro low-pass
+  corner (threaded from `config`) instead of `fs/4`, which previously let the preservation band
+  swallow the intended roll-off.
+  - **Attenuation (A)** now measures how much of the noise that *emerges as peaks above the
+    broadband floor* the filter removes (floor-referenced, same peak detection as the noise
+    panel), not a raw/filtered power ratio over the whole band. `A` is `None` when nothing
+    emerges (clean spectrum) rather than a misleading value.
+  - **Preservation (P)** is now the filter's **phase cost** in the control band — group delay it
+    adds (coherence-gated FRF of gyroUnfilt→gyroADC), mapped 0.5→2.5 ms onto 1→0 — instead of a
+    magnitude ratio. Falls back to a corner-bounded magnitude ratio when time signals are absent.
+  - **Verdict** is derived from A and P **directly** (low A = under-filtered → tighten; low P =
+    over-filtered → loosen), no longer from the harmonic score (which could not tell an
+    under-filtered low score from an over-filtered one). New codes `loosen_candidate` and
+    `na_motion_dominated`; an undefined score reads as an honest "n/a", never a low "tighten".
+- Renderer: filter-quality recommendation strings (FR/EN) rewritten to be direction-unambiguous;
+  tooltip and caption updated to the new A (emergent-noise removed) / P (phase cost) meaning.
+
+### Added
+- Analysis: `_filter_corners(config, fs)` — effective gyro corner frequencies (dynamic `gyro_lpf1`
+  resolved to its lower bound for the low-throttle quiet window). `config` is now threaded through
+  `analyse`/`build_pass` into the noise spectrum.
+- Analysis: new `filter_quality` fields per axis — `phase_lag_ms`, `mag_droop_db`, `corner_hz`,
+  `f_ctrl_max_hz`, `alpha_regime`, `excess_present`, and `worst_resid_db`/`worst_resid_hz`
+  (highest peak still above the floor after filtering). Aggregated on the mean row.
+- Renderer: filter-quality gauge readability — per-row direction badge (▲ tighten · ▼ loosen ·
+  ● balanced), phase lag in ms next to Preservation and on the verdict line, a control-band /
+  LPF-corner legend, and a residual-peak warning line (⚠ when a peak survives above the floor —
+  surfaces e.g. a too-low dyn_notch Q that the energy-based A cannot see). Null scores render "—".
+
+### Fixed
+- Analysis: filter-quality `A` no longer collapses to `None`/uninformative on real broken-power-law
+  spectra (the fit absorbed the noise hump, and an `alpha_hf` gate plus a corner floor on the
+  attenuation band suppressed it). Now keyed on floor-referenced peaks.
+- Analysis: `_filter_quality_block` mean verdict could invert a preservation-only score (a high P,
+  i.e. low phase lag, read as "over-filtered, signal loss"); axis and mean now share one
+  composition path. Mean aggregations tolerate `None` per-axis values.
+
 ## [0.1.9] - 2026-06-18
 
 ### Added

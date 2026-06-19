@@ -77,7 +77,11 @@ def test_returns_none_on_too_few_points():
 
 
 def test_fallback_no_verdict():
-    """A pure power-law spectrum (no emerging hump) -> f_split fallback -> withheld verdict."""
+    """A pure power-law spectrum (no emerging hump) -> no excess -> honest null verdict.
+
+    With no corner and no time signals, A is None (nothing emerged to attenuate) and P is
+    None (the fallback band is meaningless), so the score is None and the verdict is the
+    neutral 'loosen_candidate' — never a low number that would read as 'tighten'."""
     fs = 8000.0
     f = np.linspace(0.0, fs / 2.0, 2049)
     raw = (f + 2.0) ** -1.8 + 1e-9            # no emergence anywhere
@@ -85,9 +89,11 @@ def test_fallback_no_verdict():
     assert fq is not None
     assert fq["fallback"] is True
     assert fq["confidence"] == "low"
-    assert fq["recommendation"] == "insufficient_data"
+    assert fq["recommendation"] == "loosen_candidate"
+    assert fq["excess_present"] is False
+    assert fq["score"] is None and fq["score_attenuation"] is None and fq["score_preservation"] is None
     assert "reason" in fq
-    # A/P/score are still computed and kept
+    # keys are still present (the front-end reads them and renders n/a)
     assert {"score", "score_attenuation", "score_preservation"} <= set(fq)
 
 
@@ -124,4 +130,100 @@ def test_clean_signal_no_false_positive():
     fq = chirp._filter_quality(f, raw, _lowpass(raw, f, 100.0), fs)
     if fq is not None:
         assert fq["confidence"] == "low"
-        assert fq["recommendation"] == "insufficient_data"
+        assert fq["recommendation"] in {"loosen_candidate", "na_motion_dominated"}
+        assert fq["score"] is None
+
+
+# ── Phase 0: _filter_corners ─────────────────────────────────────────────────
+def test_filter_corners_dynamic_uses_lower_bound():
+    """A dynamic gyro_lpf1 [lo, hi] resolves its effective corner to the LOWER bound."""
+    cfg = {"gyro_lpf1": {"dyn": [120, 250]}, "gyro_lpf2": {"static": 0},
+           "dyn_notch": {"min": 90, "max": 600}}
+    c = chirp._filter_corners(cfg, 8000.0)
+    assert c is not None
+    assert c["lpf1"] == 120                 # lower dynamic bound, not 250
+    assert c["corner"] == 120.0
+    assert c["notch_min"] == 90 and c["notch_max"] == 600
+
+
+def test_filter_corners_lowest_lpf_wins():
+    """corner = the lowest active low-pass stage (where the roll-off actually starts)."""
+    cfg = {"gyro_lpf1": {"static": 250}, "gyro_lpf2": {"static": 180}}
+    assert chirp._filter_corners(cfg, 8000.0)["corner"] == 180.0
+
+
+def test_filter_corners_missing_keys_degrade():
+    """No config / empty config / no usable cutoff -> None (clean degrade to the old path)."""
+    assert chirp._filter_corners(None, 8000.0) is None
+    assert chirp._filter_corners({}, 8000.0) is None
+    assert chirp._filter_corners({"motor_poles": 14}, 8000.0) is None
+
+
+# ── Phase 1: band anchored on the real corner ────────────────────────────────
+def test_band_anchored_on_corner_no_fs4_fallback():
+    """With a corner, a clean spectrum anchors f_split on the corner, never fs/4."""
+    f, raw = _synthetic_psd()
+    fs = 8000.0
+    clean = (f + 2.0) ** -1.8 + 1e-9          # no emergence -> would fallback to fs/4 without a corner
+    corners = {"corner": 150.0, "lpf1": 150, "lpf2": None, "notch_min": 90, "notch_max": 600}
+    fq = chirp._filter_quality(f, clean, _lowpass(clean, f, 150.0), fs, corners=corners)
+    assert fq is not None
+    assert fq["fallback"] is False            # corner anchored, not fs/4
+    assert fq["f_split_hz"] == 150.0
+    assert fq["corner_hz"] == 150.0
+    assert fq["f_ctrl_max_hz"] == 90.0        # min(corner, FQ_F_CTRL_MAX)
+
+
+def test_ctrl_max_capped_at_hard_ceiling():
+    """f_ctrl_max never exceeds FQ_F_CTRL_MAX even with a high corner."""
+    f, raw = _synthetic_psd()
+    corners = {"corner": 400.0, "lpf1": 400, "lpf2": None, "notch_min": None, "notch_max": None}
+    fq = chirp._filter_quality(f, raw, _lowpass(raw, f, 400.0), 8000.0, corners=corners)
+    assert fq["f_ctrl_max_hz"] == chirp.FQ_F_CTRL_MAX
+
+
+# ── Phase 2: attenuation on the emergent excess ──────────────────────────────
+def test_attenuation_none_when_nothing_emerges():
+    """Clean power-law (no excess) -> A is None, not 1.0 (filter has nothing to attenuate)."""
+    fs = 8000.0
+    f = np.linspace(0.0, fs / 2.0, 2049)
+    clean = (f + 2.0) ** -1.8 + 1e-9
+    corners = {"corner": 150.0, "lpf1": 150, "lpf2": None, "notch_min": None, "notch_max": None}
+    fq = chirp._filter_quality(f, clean, _lowpass(clean, f, 150.0), fs, corners=corners)
+    assert fq["score_attenuation"] is None
+    assert fq["excess_present"] is False
+
+
+def test_attenuation_rises_with_stronger_filter_on_excess():
+    """With a real hump, A (on the excess) rises as the filter cuts harder."""
+    f, raw = _synthetic_psd()                 # hump @240
+    fs = 8000.0
+    corners = {"corner": 200.0, "lpf1": 200, "lpf2": None, "notch_min": None, "notch_max": None}
+    a_light = chirp._filter_quality(f, raw, _lowpass(raw, f, 300.0), fs, corners=corners)["score_attenuation"]
+    a_hard = chirp._filter_quality(f, raw, _lowpass(raw, f, 120.0), fs, corners=corners)["score_attenuation"]
+    assert a_light is not None and a_hard is not None
+    assert a_hard > a_light
+
+
+# ── Phase 4/5: None propagation through the block ────────────────────────────
+def test_block_handles_null_axes():
+    """_filter_quality_block must not crash when some/all axes have null scores."""
+    f, raw = _synthetic_psd()
+    fs = 8000.0
+    clean = (f + 2.0) ** -1.8 + 1e-9
+    fq_null = chirp._filter_quality(f, clean, _lowpass(clean, f, 100.0), fs)          # score None
+    fq_real = chirp._filter_quality(f, raw, _lowpass(raw, f, 120.0), fs)             # score defined
+    # mixed: one real axis, one null axis
+    block = chirp._filter_quality_block({"axes": {
+        "roll": {"filter_quality": fq_real},
+        "pitch": {"filter_quality": fq_null},
+    }})
+    assert block["mean"]["score"] is not None                  # the real axis carries the mean
+    assert "recommendation" in block["mean"]
+    # all-null: mean score None, neutral verdict, no crash
+    block2 = chirp._filter_quality_block({"axes": {
+        "roll": {"filter_quality": fq_null},
+        "pitch": {"filter_quality": fq_null},
+    }})
+    assert block2["mean"]["score"] is None
+    assert block2["mean"]["recommendation"] in {"loosen_candidate", "na_motion_dominated"}

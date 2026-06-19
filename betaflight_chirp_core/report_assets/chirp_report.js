@@ -813,7 +813,9 @@ function render() {
     const fq = PRI.filter_quality;
     if (fq && fq.axes && Object.keys(fq.axes).length) {
       box.appendChild(el('h3', null, tip('filter_quality', T('fq_h'))));
-      const fqAxes = ['roll','pitch','yaw'].filter(a => fq.axes[a] && fq.axes[a].score != null);
+      // keep every axis that has a filter_quality block, even with a null score (clean /
+      // motion-dominated): the row renders "—" rather than vanishing, which is the honest state.
+      const fqAxes = ['roll','pitch','yaw'].filter(a => fq.axes[a]);
       const nRows = fqAxes.length + 1;         // axes + mean row
       const ROW = 26, HDR = 22, BOT = 8;
       const Hfq = HDR + nRows * ROW + BOT;
@@ -836,14 +838,13 @@ function render() {
         {lo:0.6, hi:0.8, f:'rgba(255,190,50,0.13)'},
         {lo:0.8, hi:1.0, f:'rgba(50,200,80,0.13)'},
       ];
-      // hatch pattern for excess (over 0.8 on score bar) — built once, reused per row
-      const fqHatch = (() => {
-        const hp = document.createElement('canvas'); hp.width = 6; hp.height = 6;
-        const hc = hp.getContext('2d');
-        hc.strokeStyle = 'rgba(255,193,60,0.60)'; hc.lineWidth = 1.2;
-        hc.beginPath(); hc.moveTo(0,6); hc.lineTo(6,0); hc.stroke();
-        return c.createPattern(hp, 'repeat');
-      })();
+      // direction badge from the recommendation family: ▲ tighten (noise survives),
+      // ▼ loosen (over-filtered / room to loosen), ● balanced. n/a -> none.
+      const recBadge = r => !r ? null
+        : r.indexOf('increase') === 0 ? {g:'▲', c:'#ff7a6b'}
+        : (r.indexOf('decrease') === 0 || r === 'loosen_candidate') ? {g:'▼', c:'#6fd36f'}
+        : r === 'sweet_spot' ? {g:'●', c:'#9ecbff'}
+        : null;
       // metric column headers
       for (let m = 0; m < 3; m++) {
         c.fillStyle = mDef[m].col;
@@ -860,8 +861,7 @@ function render() {
       c.setLineDash([]);
       const drawGaugeRow = (label, data, ri, axCol, isMean) => {
         const y0 = HDR + ri * ROW + 3, bh = ROW - 8;
-        const rec = data && data.recommendation;
-        const isDecrease = rec && rec.startsWith('decrease');
+        const badge = recBadge(data && data.recommendation);
         c.font = isMean ? 'bold 10px sans-serif' : '10px sans-serif';
         c.fillStyle = axCol; c.textAlign = 'right';
         c.fillText(label, PAD - 4, y0 + bh - 1);
@@ -876,25 +876,23 @@ function render() {
           c.strokeRect(x0, y0, BW, bh);
           if (val != null) {
             const col = scCol(val);
-            // score column (m===2): split fill — solid to 0.8, hatch for excess
-            if (m === 2 && val > 0.8) {
-              c.globalAlpha = 0.62; c.fillStyle = '#6fd36f';
-              c.fillRect(x0, y0, 0.8 * BW, bh);
-              c.globalAlpha = 0.90; c.fillStyle = fqHatch;
-              c.fillRect(x0 + 0.8 * BW, y0, (val - 0.8) * BW, bh);
-              c.globalAlpha = 1;
-            } else {
-              c.globalAlpha = 0.60; c.fillStyle = col; c.fillRect(x0, y0, val * BW, bh); c.globalAlpha = 1;
-            }
+            c.globalAlpha = 0.60; c.fillStyle = col; c.fillRect(x0, y0, val * BW, bh); c.globalAlpha = 1;
             // marker tick
             c.strokeStyle = col; c.lineWidth = 2;
             c.beginPath(); c.moveTo(x0 + val * BW, y0 - 1); c.lineTo(x0 + val * BW, y0 + bh + 1); c.stroke();
-            // value label + directional arrow on score column
+            // value label
             c.fillStyle = col;
             c.fillText(val.toFixed(2), x0 + BW + 4, y0 + bh - 1);
-            if (m === 2 && isDecrease) {
-              c.fillStyle = '#ffc14d';
-              c.fillText('←', x0 + BW + VCOL - 12, y0 + bh - 1);
+            // phase lag (ms) appended on the Preservation column — the cross-tune-comparable number
+            if (m === 1 && data && data.phase_lag_ms != null) {
+              c.save(); c.font = '8px sans-serif'; c.fillStyle = '#8893a5';
+              c.fillText(data.phase_lag_ms.toFixed(1) + 'ms', x0 + BW + 4, y0 + 6);
+              c.restore();
+            }
+            // direction badge on the Score column
+            if (m === 2 && badge) {
+              c.fillStyle = badge.c;
+              c.fillText(badge.g, x0 + BW + VCOL - 12, y0 + bh - 1);
             }
           } else {
             c.fillStyle = '#8893a5'; c.fillText('—', x0 + BW + 4, y0 + bh - 1);
@@ -907,8 +905,31 @@ function render() {
       drawGaugeRow(T('fq_mean'), fq.mean || {}, fqAxes.length, '#9ecbff', true);
       const fqmd = fq.mean || {};
       if (fqmd.recommendation) {
-        const recStr = T('fq_rec_'+fqmd.recommendation) || fqmd.recommendation;
+        let recStr = T('fq_rec_'+fqmd.recommendation) || fqmd.recommendation;
+        if (fqmd.phase_lag_ms != null) recStr += ' · ' + T('fq_lag') + ' ' + fqmd.phase_lag_ms.toFixed(1) + ' ms';
         box.appendChild(el('div','legend','→ '+recStr));
+      }
+      // worst surviving residual peak — the blind spot of A (which saturates on total energy).
+      // A peak still above the floor after filtering = a notch/LPF not covering it (e.g. low Q).
+      if (fqmd.worst_resid_db != null) {
+        const wr = fqmd.worst_resid_db;
+        let rl, cls;
+        if (wr > 0) {
+          rl = '⚠ ' + T('fq_resid_warn') + ' +' + wr.toFixed(1) + ' dB @ ' + fqmd.worst_resid_hz + ' Hz'
+             + (fqmd.worst_resid_axis ? ' (' + fqmd.worst_resid_axis + ')' : '');
+          cls = 'legend warn';
+        } else {
+          rl = '✓ ' + T('fq_resid_ok') + ' (' + wr.toFixed(1) + ' dB)';
+          cls = 'legend';
+        }
+        box.appendChild(el('div', cls, rl));
+      }
+      // band legend: where P is measured (control band) and the real LPF corner, from any axis
+      const a0 = fq.axes[fqAxes[0]] || {};
+      if (a0.f_ctrl_max_hz != null) {
+        let bandStr = T('fq_band_ctrl') + ' ' + a0.f_ctrl_max_hz + ' Hz';
+        if (a0.corner_hz != null) bandStr += ' · ' + T('fq_band_corner') + ' ' + a0.corner_hz + ' Hz';
+        box.appendChild(el('div', 'legend', bandStr));
       }
       box.appendChild(el('div', 'legend', T('fq_cap')));
     }
