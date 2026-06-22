@@ -13,6 +13,22 @@ from .analysis.chirp import COHERENCE_GATE, RESIDUAL_OK_DB
 
 MAX_OVERLAY_PASSES = 8
 
+# Per-axis fields the renderer needs from a NON-primary pass: the gyro raw/filtered PSD curves (for the
+# per-pass overlay on the noise panel) and the D-term SNR scalar (for the evolution tile). Everything
+# else (peaks, motor/dterm spectra, filter_quality) is primary-only and dropped to keep the HTML light.
+_NOISE_SLIM_KEYS = ("axis", "has_unfilt", "freqs", "raw_db", "filt_db", "dterm_snr_db")
+
+
+def _slim_noise(ns: dict) -> dict:
+    """Keep only the per-axis curves + D-term SNR a non-primary pass is overlaid/tiled with."""
+    axes = ns.get("axes") or {}
+    slim = {}
+    for a, d in axes.items():
+        kept = {k: d[k] for k in _NOISE_SLIM_KEYS if k in d}
+        if kept:
+            slim[a] = kept
+    return {"axes": slim} if slim else {}
+
 
 def _assemble_report(passes: list, lang: str = "fr") -> dict:
     """Trim to the last MAX_OVERLAY_PASSES, attach pass numbers + config diffs, mark primary."""
@@ -27,10 +43,16 @@ def _assemble_report(passes: list, lang: str = "fr") -> dict:
         if p.get("file"):
             p["file"] = pathlib.PurePath(p["file"]).name
         p["diff"] = config_diff(shown[k - 1]["config"], p["config"]) if k > 0 else ""
-        # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light
+        # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light.
+        # noise_spectrum is kept but SLIMMED on the others: the renderer overlays their gyro raw/filt
+        # PSD on the noise panel (per-pass pills) and plots their D-term SNR in the evolution tile, so
+        # the per-axis curves + the SNR scalar must survive — but the heavy peaks/motor/dterm/FQ blocks
+        # (only ever shown for the primary) are dropped.
         if k != primary:
-            for heavy in ("spectrogram", "throttle_map", "noise_spectrum"):
+            for heavy in ("spectrogram", "throttle_map"):
                 p.pop(heavy, None)
+            if p.get("noise_spectrum"):
+                p["noise_spectrum"] = _slim_noise(p["noise_spectrum"])
     return {"passes": shown, "primary_index": len(shown) - 1, "total_passes": len(passes),
             "lang": lang, "_glossary": GLOSSARY, "_strings": STRINGS}
 
@@ -314,6 +336,21 @@ GLOSSARY = {
               "shared oscillation survives). Watch the band above ~200 Hz: that is where heat lives without being "
               "felt on the sticks.",
     },
+    "dterm_snr": {
+        "fr": "SNR D-term : rapport (dB) entre la puissance du signal D *utile* (réaction aux mouvements réels, "
+              "< 100 Hz) et celle du bruit que la dérivation amplifie (> 100 Hz). Mesuré sur le gyro *non filtré* "
+              "(gyroUnfilt) repondéré par f² (la dérivation multiplie l'amplitude par 2πf) : c'est donc le bruit "
+              "que le filtre D *devrait* couper, pas ce qui reste après. Plus c'est haut, moins le chemin D est "
+              "noyé dans le bruit → marge pour remonter ou désactiver le dterm_lpf2. Valeur pré-filtre, surtout "
+              "comparée entre passes : reflète le bruit mécanique inhérent (moteurs/châssis), peu sensible au "
+              "réglage de filtre courant.",
+        "en": "D-term SNR: ratio (dB) of the *useful* D signal power (reaction to real motion, < 100 Hz) to the "
+              "noise the derivative amplifies (> 100 Hz). Measured on the *unfiltered* gyro (gyroUnfilt) weighted "
+              "by f² (differentiation multiplies amplitude by 2πf): it is the noise the D filter *should* cut, not "
+              "what survives it. Higher = the D path is less noise-dominated → headroom to raise or disable "
+              "dterm_lpf2. A pre-filter figure, most useful compared across passes: it reflects the inherent "
+              "mechanical noise (motors/frame), largely insensitive to the current filter settings.",
+    },
     "propwash": {
         "fr": "Propwash : les oscillations/secousses quand le drone retombe dans ses propres turbulences "
               "(descentes rapides, sorties de virage). Souvent lié à un D mou ou trop filtré, ou à une "
@@ -339,6 +376,7 @@ STRINGS = {
         "synth_h": "Lecture d'ensemble", "synth_intro": "D'après la dernière passe",
         "synth_evo": "Évolution depuis la passe 1",
         "score_h": "Note de tune", "score_vs": "vs passe précédente", "score_all": "Toutes les passes :",
+        "score_click": "(clic = détailler cette passe)",
         "sc_rise": "montée", "sc_margin": "marge", "sc_noise": "bruit",
         "score_cap": "Note composite 0–100 (moyenne des axes) : overshoot, montée, marge garantie, Ms et marge "
                      "au bruit, chacun ramené sur 0–100 par une courbe physique puis moyenné (montée et overshoot "
@@ -376,6 +414,9 @@ STRINGS = {
                      "C'est le chemin qui atteint les ESC : un pic en haute fréquence = oscillation qui sature et "
                      "chauffe les moteurs, même si le gyro filtré paraît propre.",
         "leg_dterm_sig": "D-term", "leg_motor_out": "sortie moteur",
+        "snr_lbl": "SNR D-term :",
+        "snr_hint": "(pré-filtre, split 100 Hz — plus haut = plus de marge pour remonter/désactiver dterm_lpf2)",
+        "snr_tile": "SNR D",
         "ff_lbl": "FF", "ff_off": "FF désactivé",
         "ms_thr_t": "Ms / gaz",
         "fq_h": "Qualité du filtrage",
@@ -417,7 +458,7 @@ STRINGS = {
                    "seul). Un trou dans la ligne = indicateur non mesurable sur cette passe. La vignette "
                    "« marge · f(Ms) » est la seule à deux courbes : marge garantie à gauche en ° (trait plein), "
                    "fréquence f(Ms) à droite en Hz (tireté). Sur le Ms, la bande verte (1,3–2) est la zone saine "
-                   "visée, le rouge (>2) la zone nerveuse peu robuste.",
+                   "visée, le rouge (>2) la zone nerveuse peu robuste. ★ = la meilleure passe pour cet indicateur.",
         "cmp_h": "Comparaison des réglages",
         "cmp_none": "Réglages PID + filtres identiques sur toutes les passes — les écarts de courbes "
                     "viennent du vol (batterie, throttle, bruit), pas du tune.",
@@ -442,6 +483,7 @@ STRINGS = {
         "synth_h": "Overview", "synth_intro": "Based on the latest pass",
         "synth_evo": "Change since pass 1",
         "score_h": "Tune score", "score_vs": "vs previous pass", "score_all": "All passes:",
+        "score_click": "(click to detail that pass)",
         "sc_rise": "rise", "sc_margin": "margin", "sc_noise": "noise",
         "score_cap": "Composite 0–100 score (mean of the axes): overshoot, rise, guaranteed margin, Ms and noise "
                      "margin, each mapped to 0–100 by a physical curve then averaged (rise and overshoot weigh "
@@ -479,6 +521,9 @@ STRINGS = {
                      "This is the path that reaches the ESCs: a high-frequency peak = an oscillation that "
                      "saturates and heats the motors, even when the filtered gyro looks clean.",
         "leg_dterm_sig": "D-term", "leg_motor_out": "motor output",
+        "snr_lbl": "D-term SNR:",
+        "snr_hint": "(pre-filter, 100 Hz split — higher = more headroom to raise/disable dterm_lpf2)",
+        "snr_tile": "D SNR",
         "ff_lbl": "FF", "ff_off": "FF off",
         "ms_thr_t": "Ms / throttle",
         "fq_h": "Filter Quality",
@@ -520,7 +565,7 @@ STRINGS = {
                    "in the line = indicator not measurable on that pass. The 'margin · f(Ms)' tile is the only "
                    "two-curve one: guaranteed margin on the left in ° (solid), f(Ms) frequency on the right in "
                    "Hz (dashed). On Ms, the green band (1.3–2) is the healthy target zone, red (>2) the nervous, "
-                   "low-robustness zone.",
+                   "low-robustness zone. ★ = the best pass for that indicator.",
         "cmp_h": "Settings comparison",
         "cmp_none": "Identical PID + filter settings across all passes — curve differences come from the "
                     "flight (battery, throttle, noise), not the tune.",

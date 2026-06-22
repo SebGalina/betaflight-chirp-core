@@ -86,6 +86,12 @@ function drawAxesLin(ctx,h,xmax,ymin,ymax,ylabel,ystep,xminor) {
 }
 function plotLine(ctx,h,F,Y,coh,fmin,fmax,ymin,ymax,color,opts) {
   opts=opts||{}; const lw=opts.lw||1.8;
+  if (opts.emph) {   // emphasis pass for the hover-highlight overlay: one bold glowing line, no dimming
+    ctx.save(); ctx.globalAlpha=1; ctx.strokeStyle=color; ctx.lineWidth=opts.lw||3.4;
+    ctx.shadowColor=color; ctx.shadowBlur=9; ctx.beginPath();
+    for (let i=0;i<F.length;i++){ const x=logx(F[i],fmin,fmax), y=lerp(Y[i],ymin,ymax,h-22,8); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+    ctx.stroke(); ctx.restore(); return;
+  }
   for (let i=1;i<F.length;i++) {
     const trusted = coh[i]>=GATE && coh[i-1]>=GATE;
     ctx.globalAlpha = opts.dim ? 0.5 : 1;
@@ -99,7 +105,14 @@ function plotLine(ctx,h,F,Y,coh,fmin,fmax,ymin,ymax,color,opts) {
   ctx.globalAlpha=1;
 }
 function plotLin(ctx,h,X,Y,xmax,ymin,ymax,color,opts) {
-  opts=opts||{}; ctx.globalAlpha=opts.dim?0.5:1; ctx.strokeStyle=color; ctx.lineWidth=opts.lw||1.8;
+  opts=opts||{};
+  if (opts.emph) {   // emphasis pass for the pass-pill hover overlay: one bold glowing line, no dimming
+    ctx.save(); ctx.globalAlpha=1; ctx.strokeStyle=color; ctx.lineWidth=opts.lw||3.4;
+    ctx.shadowColor=color; ctx.shadowBlur=9; ctx.beginPath();
+    for (let i=0;i<X.length;i++){ const px=lerp(X[i],0,xmax,PAD,W-12), py=lerp(Y[i],ymin,ymax,h-22,8); i?ctx.lineTo(px,py):ctx.moveTo(px,py); }
+    ctx.stroke(); ctx.restore(); return;
+  }
+  ctx.globalAlpha=opts.dim?0.5:1; ctx.strokeStyle=color; ctx.lineWidth=opts.lw||1.8;
   ctx.beginPath();
   for (let i=0;i<X.length;i++) { const px=lerp(X[i],0,xmax,PAD,W-12), py=lerp(Y[i],ymin,ymax,h-22,8);
     i?ctx.lineTo(px,py):ctx.moveTo(px,py); }
@@ -127,7 +140,9 @@ function stepInset(ctx,h,sser,d,pcol) {
     if (y[pk]>1.0) { for(let i=pk;i<y.length;i++) if(y[i]<=1.0) return t[i]; }
     for(let i=0;i<y.length;i++) if(y[i]>=0.98) return t[i]; return t[t.length-1]; };
   const prim=sser.find(o=>o.primary)||sser[sser.length-1];   // window the inset on the reference pass
-  let xz=recross(prim.p.step.t_ms,prim.p.step.y)*1.3||25;
+  // Inset spans the FULL time range (≈150 ms) — a y-zoom around the target, so the settle ripple over
+  // the whole response is legible, not only the first transient. recross() kept for the y-track gate.
+  let xz=0; sser.forEach(o=>{ const t=o.p.step.t_ms; xz=Math.max(xz,t[t.length-1]); }); xz=xz||25; void recross;
   // y-window around 1: start tracking min/max only once the curve nears the target (>=0.7), so the
   // rise from 0 doesn't drag the floor down — we want the overshoot/return detail, not the whole rise.
   let lo=0.75, hi=1.25;
@@ -152,6 +167,12 @@ function stepInset(ctx,h,sser,d,pcol) {
   ctx.globalAlpha=1; ctx.restore();
   ctx.fillStyle='#9ecbff'; ctx.font='9px sans-serif'; ctx.fillText('zoom 0–'+xz.toFixed(0)+' ms', x0+4, y0+10);
   ctx.fillStyle='#8893a5'; ctx.fillText(hi.toFixed(2), x0+iw-26, y0+10); ctx.fillText(lo.toFixed(2), x0+iw-26, y0+ih-4);
+}
+// Five-point ★ marking the best pass for an indicator on the evolution tiles.
+function drawStar(ctx,x,y,color){
+  ctx.save(); ctx.fillStyle=color; ctx.strokeStyle='#1a1f2b'; ctx.lineWidth=0.6; ctx.beginPath();
+  for(let k=0;k<10;k++){ const a=-Math.PI/2+k*Math.PI/5, r=(k%2?1.9:4.3); const px=x+Math.cos(a)*r, py=y+Math.sin(a)*r; k?ctx.lineTo(px,py):ctx.moveTo(px,py); }
+  ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
 }
 // Small fixed-size canvas for the per-axis evolution sparkline grid (cadre 3).
 function mkMini(parent,w,h) { const c=document.createElement('canvas'); c.width=w; c.height=h;
@@ -209,6 +230,7 @@ function drawMini(canvas,title,pts,color,opts) {
   ctx.fillStyle='#8893a5'; const dec=(ymax-ymin>=10)?0:1;
   ctx.fillText(ymax.toFixed(dec)+unit,2,Tt+7); ctx.fillText(ymin.toFixed(dec)+unit,2,ch-Bb+2);  // unit recalled on the ordinate
   miniSeries(ctx,pts,xpos,ypos,color,opts.dash);
+  if (opts.star!=null && opts.star>=0 && pts[opts.star] && pts[opts.star].v!=null) drawStar(ctx,xpos(opts.star),ypos(pts[opts.star].v),color);
   ctx.fillStyle='#8893a5'; pts.forEach((p,i)=>ctx.fillText(p.n, xpos(i)-3, ch-4));
   canvas._hpts=pts.map((p,i)=> p.v!=null ? {x:xpos(i), y:ypos(p.v), t:p.v.toFixed(dec)+unit} : null).filter(Boolean);
   miniHover(canvas);
@@ -216,8 +238,8 @@ function drawMini(canvas,title,pts,color,opts) {
 // Two indicators sharing one tile (independent left/right y-axes): A = left, solid; B = right, dashed.
 // Title = the two labels in their own colour, each UNDERLINED with its line style (solid A / dashed B),
 // so no "(plein)/(tireté)" words are needed. uA/uB are the units recalled on each ordinate.
-function drawMini2(canvas,lA,lB,ptsA,ptsB,colA,colB,uA,uB) {
-  uA=uA||''; uB=uB||'';
+function drawMini2(canvas,lA,lB,ptsA,ptsB,colA,colB,uA,uB,opts) {
+  uA=uA||''; uB=uB||''; opts=opts||{};
   const ctx=canvas.getContext('2d'), cw=canvas.width, ch=canvas.height;
   const L=24, Rr=24, Tt=18, Bb=16;
   ctx.clearRect(0,0,cw,ch); ctx.font='10px sans-serif';
@@ -237,10 +259,12 @@ function drawMini2(canvas,lA,lB,ptsA,ptsB,colA,colB,uA,uB) {
   if(ra) { const [aMin,aMax]=ra, yA=v=>(ch-Bb)-(v-aMin)/(aMax-aMin)*(ch-Bb-Tt);
     ctx.fillStyle='#8893a5'; ctx.fillText(aMax.toFixed(0)+uA,0,Tt+7); ctx.fillText(aMin.toFixed(0)+uA,0,ch-Bb+2);
     miniSeries(ctx,ptsA,xpos,yA,colA);
+    if(opts.starA!=null && opts.starA>=0 && ptsA[opts.starA] && ptsA[opts.starA].v!=null) drawStar(ctx,xpos(opts.starA),yA(ptsA[opts.starA].v),colA);
     ptsA.forEach((p,i)=>{ if(p.v!=null) hp.push({x:xpos(i), y:yA(p.v), t:p.v.toFixed(0)+uA}); }); }
   if(rb) { const [bMin,bMax]=rb, yB=v=>(ch-Bb)-(v-bMin)/(bMax-bMin)*(ch-Bb-Tt);
     ctx.fillStyle='#8893a5'; ctx.fillText(bMax.toFixed(0)+uB,cw-Rr+2,Tt+7); ctx.fillText(bMin.toFixed(0)+uB,cw-Rr+2,ch-Bb+2);
     miniSeries(ctx,ptsB,xpos,yB,colB,[3,2]);
+    if(opts.starB!=null && opts.starB>=0 && ptsB[opts.starB] && ptsB[opts.starB].v!=null) drawStar(ctx,xpos(opts.starB),yB(ptsB[opts.starB].v),colB);
     ptsB.forEach((p,i)=>{ if(p.v!=null) hp.push({x:xpos(i), y:yB(p.v), t:p.v.toFixed(0)+uB}); }); }
   ctx.fillStyle='#8893a5'; ptsA.forEach((p,i)=>ctx.fillText(p.n, xpos(i)-3, ch-4));
   canvas._hpts=hp; miniHover(canvas);
@@ -339,6 +363,12 @@ function coherZone(ctx,h,ftrust,fmin,fmax,label) {
 const root=host.querySelector('.cr-root');
 const single = R.total_passes<=1;
 const HIDDEN = new Set();   // pass indices whose overlay curves are hidden (pill toggles, global)
+let scoreSel = PRIMARY;     // pass whose detail is shown in the score table (click a score to change)
+// Cross-axis pass highlight: hovering a pass pill emphasises that pass's curve on every axis plot.
+// HL.fns[i] = [() => redraw pass i bold on an overlay], HL.ovs = all overlays to clear. Rebuilt each render().
+let HL = {fns:{}, ovs:[]};
+function hlClear(){ HL.ovs.forEach(o=>o.ov.clearRect(0,0,W,o.h)); }
+function hlShow(i){ hlClear(); (HL.fns[i]||[]).forEach(fn=>fn()); }
 
 // --- Shared visual identity: one colour + pictogram per INDICATOR and per CONFIG item, reused
 // everywhere they are named (tune score, evolution tiles, config tooltip, comparison table) so the
@@ -418,6 +448,8 @@ function passPills() {
     b.style.borderColor=col; b.style.color=off?'#6b7689':col;
     // preserve scroll: render() rebuilds the whole root, which would otherwise jump back to the top
     b.onclick=()=>{ off?HIDDEN.delete(i):HIDDEN.add(i); const y=window.scrollY; render(); window.scrollTo(0,y); };
+    // hover -> emphasise this pass's curve on every axis plot (gain/phase/coherence) at once
+    if (!off) { b.addEventListener('mouseenter',()=>hlShow(i)); b.addEventListener('mouseleave',hlClear); }
     wrap.appendChild(b);
   });
   return wrap;
@@ -425,6 +457,7 @@ function passPills() {
 
 function render() {
   root.innerHTML='';
+  HL = {fns:{}, ovs:[]};   // reset the cross-axis highlight registry for this render
   W = Math.max(320, Math.min(1760, (host.clientWidth || window.innerWidth) - 24));   // responsive: fill the host
   hdrEl.innerHTML =
       '<div class="banner-main"><span class="banner-icon">∿</span>'
@@ -451,10 +484,13 @@ function render() {
 
   // ---- TUNE score (composite 0-100 + delta vs previous pass: better/worse after a config change) ----
   if (PRI.tune_score && PRI.tune_score.overall!=null) {
-    const ts=PRI.tune_score;
+    // the table/band reflect the SELECTED pass (click a score in the "all passes" line to switch);
+    // defaults to the primary pass.
+    const sIdx=(PASSES[scoreSel] && PASSES[scoreSel].tune_score && PASSES[scoreSel].tune_score.overall!=null) ? scoreSel : PRIMARY;
+    const ts=PASSES[sIdx].tune_score;
     const box=el('div','axis score'); let s='<h2><span class=sicon>🎯</span>'+T('score_h')+'</h2>';
     let dtxt='';
-    const prev=(PRIMARY>0 && PASSES[PRIMARY-1] && PASSES[PRIMARY-1].tune_score) ? PASSES[PRIMARY-1].tune_score : null;
+    const prev=(sIdx>0 && PASSES[sIdx-1] && PASSES[sIdx-1].tune_score) ? PASSES[sIdx-1].tune_score : null;
     if (prev && prev.overall!=null) {
       const dv=Math.round((ts.overall-prev.overall)*10)/10;
       const col=dv>0?'#7ddf7d':(dv<0?'#ff8a80':'#8893a5'), ar=dv>0?'▲':(dv<0?'▼':'=');
@@ -462,6 +498,8 @@ function render() {
     }
     s+='<div class=scoreband><span class=scorebig>'+ts.overall.toFixed(0)+'<span class=scoremax>/100</span></span>'
      + '<span class=scoregrade>'+ts.grade+'</span>'+dtxt+'</div>';
+    // table title = which pass this detail belongs to (in that pass's palette colour)
+    if (!single) s+='<div class=scoreseltitle style="color:'+PAL[sIdx%PAL.length]+'">▸ '+T('pass_word')+' '+PASSES[sIdx].n+'</div>';
     // Per-axis detail as a table: one column per indicator. Labels (header) carry the indicator's
     // colour + pictogram (same identity as the evolution tiles); values stay white, in their own cells.
     const SUBL={overshoot:'overshoot', rise:T('sc_rise'), margin:T('sc_margin'), ms:'Ms', noise:T('sc_noise')};
@@ -481,12 +519,16 @@ function render() {
     const scored=PASSES.map((p,i)=>({n:p.n, i:i, v:(p.tune_score&&p.tune_score.overall)})).filter(o=>o.v!=null);
     if (scored.length>1) {
       const best=Math.max(...scored.map(o=>o.v));
-      const line=scored.map(o=>'<span class="passtip" data-pass="'+o.i+'" style="color:'+PAL[o.i%PAL.length]+'">P'+o.n+' ('+o.v.toFixed(0)+')</span>'
+      // each pass score is clickable: it selects which pass the table above details (sel = boxed)
+      const line=scored.map(o=>'<span class="passtip scoresel'+(o.i===sIdx?' on':'')+'" data-pass="'+o.i+'" style="color:'+PAL[o.i%PAL.length]+'">P'+o.n+' ('+o.v.toFixed(0)+')</span>'
         +(o.v===best?'<span style="color:#ffd479"> ★</span>':'')).join('  ·  ');
-      s+='<div class="meta scoreall">'+T('score_all')+' '+line+'</div>';
+      s+='<div class="meta scoreall">'+T('score_all')+' '+line+' <span class=scoreselhint>'+T('score_click')+'</span></div>';
     }
     s+='<p class=meta>'+T('score_cap')+'</p>';
     box.innerHTML=s; root.appendChild(box);
+    // click a pass score -> re-render with the table detailing that pass (preserve scroll)
+    box.querySelectorAll('.scoreall .scoresel[data-pass]').forEach(sp=>{ sp.style.cursor='pointer';
+      sp.addEventListener('click',()=>{ scoreSel=+sp.dataset.pass; const y=window.scrollY; render(); window.scrollTo(0,y); }); });
   }
 
   // ---- Per-axis indicator evolution (right after the score: it shows how each sub-metric moved
@@ -502,14 +544,29 @@ function render() {
     const MTZONES=[{lo:1.0,hi:1.5,fill:'rgba(120,200,120,0.14)'},{lo:1.5,hi:9,fill:'rgba(255,120,120,0.12)'}];
     // each tile carries the shared INDICATOR identity (colour+picto from IND), so a column links to
     // the same-coloured sub-score in the tune note above. Axes (rows) are told apart by their label.
+    // `best` = how the ★ (best pass for this indicator) is picked: by the tune sub-score when there
+    // is one (overshoot/rise/margin/ms — the actual "note"), else by raw value direction.
     const INDIC=[
-      {k:'s', key:'overshoot', t:'overshoot', u:'%', g:d=>sm(d,'overshoot_pct'), r:d=>d.overshoot_range},
-      {k:'s', key:'rise', t:(LANG==='fr'?'montée':'rise'), u:'ms', g:d=>sm(d,'rise_ms'), r:d=>d.rise_range},
-      {k:'s', key:'settle', t:(LANG==='fr'?'établiss.':'settle'), u:'ms', g:d=>sm(d,'settle_ms'), r:d=>d.settle_range},
-      {k:'d', uA:'°', uB:'Hz', gA:d=>d.pm_guaranteed_deg, rA:d=>d.pm_guaranteed_range, gB:d=>d.f_ms_hz, rB:d=>d.f_ms_range},
-      {k:'s', key:'ms', t:'Ms', u:'', g:d=>d.ms, r:d=>d.ms_range, opts:{ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES}},
-      {k:'s', key:'mt', t:'Mt', u:'', g:d=>d.mt, r:d=>d.mt_range, opts:{ctx_lo:1.0, ctx_hi:1.8, zones:MTZONES}},
+      {k:'s', key:'overshoot', t:'overshoot', u:'%', g:d=>sm(d,'overshoot_pct'), r:d=>d.overshoot_range, best:{subKey:'overshoot'}},
+      {k:'s', key:'rise', t:(LANG==='fr'?'montée':'rise'), u:'ms', g:d=>sm(d,'rise_ms'), r:d=>d.rise_range, best:{subKey:'rise'}},
+      {k:'s', key:'settle', t:(LANG==='fr'?'établiss.':'settle'), u:'ms', g:d=>sm(d,'settle_ms'), r:d=>d.settle_range, best:{dir:'min'}},
+      {k:'d', uA:'°', uB:'Hz', gA:d=>d.pm_guaranteed_deg, rA:d=>d.pm_guaranteed_range, gB:d=>d.f_ms_hz, rB:d=>d.f_ms_range, bestA:{subKey:'margin'}, bestB:{dir:'max'}},
+      {k:'s', key:'ms', t:'Ms', u:'', g:d=>d.ms, r:d=>d.ms_range, opts:{ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES}, best:{subKey:'ms'}},
+      {k:'s', key:'mt', t:'Mt', u:'', g:d=>d.mt, r:d=>d.mt_range, opts:{ctx_lo:1.0, ctx_hi:1.8, zones:MTZONES}, best:{dir:'min'}},
     ];
+    // best pass index for a tile: highest sub-score (spec.subKey) or best raw value (spec.dir). -1 if <2 passes.
+    const bestPassIdx=(axis,spec,pts)=>{
+      if(!spec) return -1;
+      const cand=[];
+      PASSES.forEach((p,i)=>{ let v=null;
+        if(spec.subKey){ const a=p.tune_score&&p.tune_score.axes&&p.tune_score.axes[axis]; v=(a&&a.subs)?a.subs[spec.subKey]:null; }
+        else { v=pts[i]?pts[i].v:null; }
+        if(v!=null) cand.push({i,v}); });
+      if(cand.length<2) return -1;
+      const useMax = spec.subKey || spec.dir==='max';
+      let b=cand[0]; cand.forEach(o=>{ if(useMax? o.v>b.v : o.v<b.v) b=o; });
+      return (pts[b.i] && pts[b.i].v!=null) ? b.i : -1;   // star only on a pass that has a plotted point
+    };
     const axesSet=[]; PASSES.forEach(p=>Object.keys(p.axes||{}).forEach(a=>{ if(!axesSet.includes(a)) axesSet.push(a); }));
     const ord=['roll','pitch','yaw']; axesSet.sort((a,b)=>ord.indexOf(a)-ord.indexOf(b));
     if (axesSet.length) {
@@ -525,10 +582,11 @@ function render() {
         for (const ind of INDIC) {
           if (ind.k==='d') {   // dual tile: margin (green, solid) + f(Ms) (purple, dashed) — indicator colours
             const A=ptsFor(axis,ind.gA,ind.rA), B=ptsFor(axis,ind.gB,ind.rB);
-            if (A.some(p=>p.v!=null)||B.some(p=>p.v!=null)) drawMini2(mkMini(grid,mw,mh), (LANG==='fr'?'marge':'margin'), 'f(Ms)', A, B, IND.margin.c, IND.ms.c, ind.uA, ind.uB);
+            if (A.some(p=>p.v!=null)||B.some(p=>p.v!=null)) drawMini2(mkMini(grid,mw,mh), (LANG==='fr'?'marge':'margin'), 'f(Ms)', A, B, IND.margin.c, IND.ms.c, ind.uA, ind.uB,
+              {starA:bestPassIdx(axis,ind.bestA,A), starB:bestPassIdx(axis,ind.bestB,B)});
           } else {
             const col=IND[ind.key].c, pts=ptsFor(axis,ind.g,ind.r);
-            const o2=Object.assign({}, ind.opts||{}, {unit:ind.u||''});
+            const o2=Object.assign({}, ind.opts||{}, {unit:ind.u||'', star:bestPassIdx(axis,ind.best,pts)});
             if (pts.some(p=>p.v!=null)) drawMini(mkMini(grid,mw,mh), IND[ind.key].p+' '+ind.t, pts, col, o2);
           }
         }
@@ -536,6 +594,15 @@ function render() {
         // (TPA cue). Lives in the primary pass; only present when several sweeps span a throttle range.
         const mtr=(PRI.axes[axis]||{}).ms_throttle;
         if (mtr && mtr.length>=2) drawMiniThr(mkMini(grid,mw,mh), IND.ms.p+' '+T('ms_thr_t'), mtr, IND.ms.c, {ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES});
+        // D-term SNR evolution (pre-filter, from noise_spectrum — not p.axes): higher (less negative)
+        // = cleaner D path = more headroom to raise/disable dterm_lpf2. ★ on the highest SNR pass.
+        const snrPts=PASSES.map(p=>{ const na=((p.noise_spectrum||{}).axes||{})[axis], v=na?na.dterm_snr_db:null;
+          return {n:p.n, v:(v==null?null:v), lo:null, hi:null}; });
+        if (snrPts.some(p=>p.v!=null)) {
+          let bi=-1, bv=-Infinity; snrPts.forEach((p,i)=>{ if(p.v!=null && p.v>bv){ bv=p.v; bi=i; } });
+          const cnt=snrPts.filter(p=>p.v!=null).length;
+          drawMini(mkMini(grid,mw,mh), IND.noise.p+' '+T('snr_tile'), snrPts, IND.noise.c, {unit:' dB', star:cnt>=2?bi:-1});
+        }
       }
     }
   }
@@ -612,33 +679,51 @@ function render() {
       box.appendChild(el('h3',null,tip('throttle_map',T('tmap_h'))+' ('+tm.axis+' gyro · '+(tm.source||'?')+')'
         +' <span class="maptip" title="">?</span>'));
       const rows=tm.levels_db.length, cols=tm.freqs.length;
-      // Robust colour scale: anchor to the 10th–98th percentiles, not the absolute min/max. With raw
-      // min/max a single quiet cell drags the floor down and the whole map saturates red even when the
-      // noise is fairly uniform — a contrast artefact, not "noisy everywhere". Percentiles fix that:
-      // a calm map reads blue/green, only genuine hot-spots (top ~2%) go red.
+      const bins=tm.throttle_bins.map(Number);
+      // Inverted axes: throttle on X (linear), freq on Y (log). Robust colour scale anchored to the
+      // 10th–98th percentiles (a single quiet cell can't saturate the whole map red).
       const flat=tm.levels_db.flat().filter(v=>v!==null).sort((a,b)=>a-b);
       const lo=flat[Math.floor(flat.length*0.10)], hi=flat[Math.floor(flat.length*0.98)];
-      const cw=W-PAD-12, chh=22, H2=rows*chh+30;
-      const ctx=mkCanvas(box,H2).getContext('2d'); ctx.clearRect(0,0,W,H2);
-      for (let r=0;r<rows;r++) for (let c=0;c<cols;c++) {
-        const v=tm.levels_db[r][c]; if (v===null) continue; const tn=Math.max(0,Math.min(1,(v-lo)/((hi-lo)||1)));
-        ctx.fillStyle='rgb('+Math.round(255*Math.min(1,tn*1.6))+','+Math.round(120*Math.max(0,1-Math.abs(tn-0.5)*2))+','+Math.round(255*(1-tn))+')';
-        ctx.fillRect(PAD+c*cw/cols, 8+(rows-1-r)*chh, cw/cols+1, chh);
-      }
-      ctx.fillStyle='#8893a5'; ctx.font='10px sans-serif';
-      for (let r=0;r<rows;r++) ctx.fillText(tm.throttle_bins[r], 4, 8+(rows-1-r)*chh+14);
       const fmin=tm.freqs[0], fmax=tm.freqs[cols-1];
+      // throttle axis starts at the lowest flown bin and EXTENDS to full stick (2000 µs, or 100 if the
+      // source is a percentage). The un-flown high-throttle band is painted — not left blank — with a
+      // pale "no-data" blue derived from the data blue, so "untested" reads differently from "quiet".
+      const pctSrc = bins[bins.length-1] <= 100;
+      const thrMin = bins[0], thrAxisMax = Math.max(bins[bins.length-1], pctSrc?100:2000);
+      const binStep = bins.length>1 ? (bins[1]-bins[0]) : (thrAxisMax-thrMin)/8;
+      const H2=220, pw=W-PAD-12, yTop=8, yBot=H2-26;
+      const ctx=mkCanvas(box,H2).getContext('2d'); ctx.clearRect(0,0,W,H2);
+      const xThr=t=>PAD+(t-thrMin)/((thrAxisMax-thrMin)||1)*pw;
+      const yF=f=>lerp(Math.log10(f),Math.log10(fmin),Math.log10(fmax),yBot,yTop);
+      const NODATA='rgba(96,132,184,0.30)';
+      // 1) flood the plot with no-data blue; measured cells paint over it, so both the un-flown throttle
+      //    band and interior null cells end up pale blue (honest "untested" marker).
+      ctx.fillStyle=NODATA; ctx.fillRect(PAD,yTop,pw,yBot-yTop);
+      // 2) paint each measured cell with the noise colormap (freq strip × throttle-bin column)
+      const binW=pw*binStep/((thrAxisMax-thrMin)||1)+1;
+      for (let r=0;r<rows;r++) { const x0=xThr(bins[r]);
+        for (let c=0;c<cols;c++) { const v=tm.levels_db[r][c]; if (v===null) continue;
+          const tn=Math.max(0,Math.min(1,(v-lo)/((hi-lo)||1)));
+          const y1=yF(tm.freqs[c]), y0=(c<cols-1)?yF(tm.freqs[c+1]):yTop;
+          ctx.fillStyle='rgb('+Math.round(255*Math.min(1,tn*1.6))+','+Math.round(120*Math.max(0,1-Math.abs(tn-0.5)*2))+','+Math.round(255*(1-tn))+')';
+          ctx.fillRect(x0, Math.min(y0,y1)-0.5, binW, Math.abs(y1-y0)+1); } }
+      // freq (Y) decade ticks
+      ctx.fillStyle='#8893a5'; ctx.font='10px sans-serif';
       for (let d=Math.floor(Math.log10(fmin));d<=Math.ceil(Math.log10(fmax));d++) for (const m of [1,2,5]) {
-        const f=m*Math.pow(10,d); if (f<fmin||f>fmax) continue;
-        const x=PAD+(Math.log10(f)-Math.log10(fmin))/(Math.log10(fmax)-Math.log10(fmin))*cw;
-        ctx.fillText(f>=1000?(f/1000)+'k':f, x-6, H2-6); }
-      ctx.fillStyle='#9ecbff'; ctx.fillText('throttle ↑   freq (Hz) →', PAD, H2-18);
-      const tmx=f=>PAD+(Math.log10(f)-Math.log10(fmin))/(Math.log10(fmax)-Math.log10(fmin))*cw;
-      const tvl=(f,col,lab)=>{ if(!f||f<fmin||f>fmax)return; const x=tmx(f);
-        ctx.strokeStyle=col; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(x,8); ctx.lineTo(x,H2-26); ctx.stroke(); ctx.setLineDash([]);
-        if(lab){ctx.fillStyle=col; ctx.fillText(lab,x+2,18);} };
-      if (CFG.dyn_notch) { tvl(CFG.dyn_notch.min,'#ffd479','dyn_notch'); tvl(CFG.dyn_notch.max,'#ffd479',''); }
-      for (const su of (PRI.filter_suggestions||[])) tvl(su.freq_hz,'#ff8a80','rés');
+        const f=m*Math.pow(10,d); if (f<fmin||f>fmax) continue; const y=yF(f);
+        ctx.fillText(f>=1000?(f/1000)+'k':f, 4, y+3); }
+      // throttle (X) ticks: lowest flown bin, data edge, full-stick max
+      const xtick=(t,lab)=>{ const x=xThr(t); ctx.fillStyle='#8893a5'; ctx.fillText(lab, Math.min(Math.max(x-10,PAD), W-34), H2-6); };
+      xtick(thrMin, thrMin.toFixed(0)); xtick(bins[bins.length-1], bins[bins.length-1].toFixed(0)); xtick(thrAxisMax, thrAxisMax.toFixed(0)+(pctSrc?'%':''));
+      // dashed boundary at the edge of the flown range (left = measured, right = no-data)
+      { const xb=xThr(bins[bins.length-1]+binStep); ctx.strokeStyle='rgba(158,203,255,0.4)'; ctx.setLineDash([2,3]); ctx.beginPath(); ctx.moveTo(xb,yTop); ctx.lineTo(xb,yBot); ctx.stroke(); ctx.setLineDash([]); }
+      ctx.fillStyle='#9ecbff'; ctx.fillText('freq (Hz) ↑   throttle →', PAD, H2-18);
+      // filter cut-offs are HORIZONTAL lines now (freq on Y)
+      const thl=(f,col,lab)=>{ if(!f||f<fmin||f>fmax)return; const y=yF(f);
+        ctx.strokeStyle=col; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(PAD,y); ctx.lineTo(W-12,y); ctx.stroke(); ctx.setLineDash([]);
+        if(lab){ctx.fillStyle=col; ctx.fillText(lab,PAD+2,y-2);} };
+      if (CFG.dyn_notch) { thl(CFG.dyn_notch.min,'#ffd479','dyn_notch'); thl(CFG.dyn_notch.max,'#ffd479',''); }
+      for (const su of (PRI.filter_suggestions||[])) thl(su.freq_hz,'#ff8a80','rés');
       box.appendChild(el('div','howto','<span class=meta>'+T('tmap_lo')+'</span><span class=scalebar></span><span class=meta>'+T('tmap_hi')+'</span>'));
       box.appendChild(el('div','howto',T('tmap_howto')));
     } else {
@@ -656,6 +741,7 @@ function render() {
       // default = the most telling axis (highest peak above the floor)
       let primAxis = axList.slice().sort((a,b)=>nscore(b)-nscore(a))[0] || ns0.axis;
       const sel = new Set([primAxis]);
+      const NSEL = new Set([PRIMARY]);   // pass indices whose gyro raw+filt overlay the PSD (primary always on)
       const head = el('h3',null,tip('noise_psd',T('noise_h'))+' ');
       const axTag = el('span',null,'('+primAxis+' gyro)'); axTag.style.color='#8893a5'; head.appendChild(axTag);
       const chips=[];
@@ -673,6 +759,29 @@ function render() {
         c.style.background=on?AXC[a]:'transparent'; c.style.color=on?'#0d1016':AXC[a]; } };
       paintChips();
       box.appendChild(head);
+      // Per-pass overlay pills (like each PID block): toggle a pass to overlay its gyro raw+filt on the
+      // PSD, hover to emphasise. The dB axis is floor-relative — each pass is plotted vs its OWN noise
+      // floor (0 dB) — so curves from passes with different absolute noise levels stay comparable.
+      let noiseNC=null;   // live NC handle (set by drawNoise) so pill hover can draw on the overlay
+      function noiseEmph(i){ const o=noiseNC; if(!o) return; o.ov.clearRect(0,0,W,o.h);
+        const np=((PASSES[i].noise_spectrum||{}).axes||{})[primAxis]; if(!np||!np.freqs) return;
+        const oo=np.freqs.map(_=>1), col=PAL[i%PAL.length];
+        plotLine(o.ov,o.h,np.freqs,np.raw_db,oo,o.fmin,o.fmax,o.lo,o.hi,col,{emph:true});
+        if(np.has_unfilt) plotLine(o.ov,o.h,np.freqs,np.filt_db,oo,o.fmin,o.fmax,o.lo,o.hi,col,{emph:true,lw:2.4}); }
+      if (!single) {
+        // inline in the section title (not the absolute .passpills, which would jump to the top of the
+        // whole Filtering cadre and collide with its heading)
+        const pwrap=el('span'); pwrap.style.cssText='display:inline-flex;gap:5px;margin-left:10px;vertical-align:middle';
+        PASSES.forEach((p,i)=>{ if(!((p.noise_spectrum||{}).axes||{})[primAxis]) return;
+          const col=PAL[i%PAL.length], b=document.createElement('button');
+          const setStyle=()=>{ const off=!NSEL.has(i); b.classList.toggle('off',off); b.style.color=off?'#6b7689':col; };
+          b.className='pillbtn'; b.textContent='P'+p.n; b.style.borderColor=col; setStyle();
+          b.onclick=()=>{ NSEL.has(i)?NSEL.delete(i):NSEL.add(i); setStyle(); render(); };
+          b.addEventListener('mouseenter',()=>noiseEmph(i));
+          b.addEventListener('mouseleave',()=>{ if(noiseNC) noiseNC.ov.clearRect(0,0,W,noiseNC.h); });
+          pwrap.appendChild(b); });
+        head.appendChild(pwrap);
+      }
       const nbody=el('div'); box.appendChild(nbody);
       const render=()=>{ nbody.innerHTML=''; drawNoise(nbody); };
 
@@ -684,6 +793,7 @@ function render() {
       const sorted=ns.raw_db.slice().sort((a,b)=>a-b); const hiR=sorted[Math.floor(sorted.length*0.97)];
       let lo=Math.max(-25,Math.min(-6,...ns.filt_db)), hi=Math.max(12,Math.ceil(hiR/5)*5+3);
       const H3=180, NC=mkCanvasHL(box,H3), nc=NC.ctx;
+      noiseNC={ov:NC.ov, h:H3, fmin, fmax, lo, hi};   // expose to pill hover (noiseEmph)
       drawAxes(nc,H3,fmin,fmax,lo,hi,'dB/plancher');
       if (CFG.dyn_notch) vband(nc,H3,CFG.dyn_notch.min,CFG.dyn_notch.max,fmin,fmax,'rgba(255,212,121,0.07)');
       nc.font='10px sans-serif';
@@ -704,20 +814,32 @@ function render() {
       hline(nc,H3,0,lo,hi,'#7e8aa0','plancher');                              // 0 dB = noise floor
       hline(nc,H3,RESID_OK,lo,hi,'#ff8a80','+'+RESID_OK+' dB');  // indicative residual-resonance guide
       const ones=F.map(_=>1);
-      if (ns.has_unfilt) plotLine(nc,H3,F,ns.filt_db,ones,fmin,fmax,lo,hi,'#80cbc4',{lw:1.6});
-      plotLine(nc,H3,F,ns.raw_db,ones,fmin,fmax,lo,hi,'#4fc3f7',{lw:1.8});
-      // yellow dots only — the freq/height labels are dropped from the busy overview and shown
-      // instead in the per-peak hover zoom below (less clutter on the full-band plot).
-      for (const pk of (ns.peaks||[])) { if (pk.freq_hz<fmin||pk.freq_hz>fmax) continue;
-        const x=logx(pk.freq_hz,fmin,fmax), y=lerp(pk.above_floor_db,lo,hi,H3-22,8);
-        nc.fillStyle='#ffd479'; nc.beginPath(); nc.arc(x,y,2.6,0,7); nc.fill(); }
+      // primary pass curve respects its own pill (NSEL): deselecting hides it, like every other pass.
+      // The axes/floor/filter-cutoff scaffolding stays (it's config reference, not a pass curve).
+      const primOn=NSEL.has(PRIMARY);
+      if (primOn) {
+        if (ns.has_unfilt) plotLine(nc,H3,F,ns.filt_db,ones,fmin,fmax,lo,hi,'#80cbc4',{lw:1.6});
+        plotLine(nc,H3,F,ns.raw_db,ones,fmin,fmax,lo,hi,'#4fc3f7',{lw:1.8});
+        // yellow dots only — the freq/height labels are dropped from the busy overview and shown
+        // instead in the per-peak hover zoom below (less clutter on the full-band plot).
+        for (const pk of (ns.peaks||[])) { if (pk.freq_hz<fmin||pk.freq_hz>fmax) continue;
+          const x=logx(pk.freq_hz,fmin,fmax), y=lerp(pk.above_floor_db,lo,hi,H3-22,8);
+          nc.fillStyle='#ffd479'; nc.beginPath(); nc.arc(x,y,2.6,0,7); nc.fill(); }
+      }
       // overlay the other selected axes (their filtered PSD — what the loop actually sees), thinner & axis-coloured
       const others=[...sel].filter(a=>a!==primAxis);
       for (const a of others) { const o=NA[a]; if(!o||!o.freqs) continue;
         const oo=o.freqs.map(_=>1);
         plotLine(nc,H3,o.freqs,o.filt_db,oo,fmin,fmax,lo,hi,AXC[a],{lw:1.3}); }
+      // per-pass overlay: each selected pass's gyro raw (solid) + filt (dim) for this axis, in its
+      // palette colour. Floor-relative dB → directly comparable to the primary curve above.
+      for (const i of NSEL) { if (i===PRIMARY) continue;
+        const np=((PASSES[i].noise_spectrum||{}).axes||{})[primAxis]; if(!np||!np.freqs) continue;
+        const oo=np.freqs.map(_=>1), col=PAL[i%PAL.length];
+        plotLine(nc,H3,np.freqs,np.raw_db,oo,fmin,fmax,lo,hi,col,{lw:1.4});
+        if(np.has_unfilt) plotLine(nc,H3,np.freqs,np.filt_db,oo,fmin,fmax,lo,hi,col,{lw:1,dim:true}); }
       const nleg=el('div','legend',
-        (ns.has_unfilt?('<span style="color:#4fc3f7">— '+T('leg_raw')+' ('+primAxis+')</span><span style="color:#80cbc4">— '+T('leg_filt')+'</span>'):'<span style="color:#4fc3f7">— gyro ('+primAxis+')</span>')+
+        (primOn?(ns.has_unfilt?('<span style="color:#4fc3f7">— '+T('leg_raw')+' ('+primAxis+')</span><span style="color:#80cbc4">— '+T('leg_filt')+'</span>'):'<span style="color:#4fc3f7">— gyro ('+primAxis+')</span>'):'')+
         others.map(a=>'<span style="color:'+AXC[a]+'">— '+a+' '+T('noise_axis_other')+'</span>').join('')+
         '<span style="color:#7e8aa0">-- '+T('leg_floor')+'</span>'+
         '<span style="color:#ff8a80">-- '+T('leg_resid')+'</span>'+
@@ -726,6 +848,11 @@ function render() {
         '<span data-hl="notch" style="color:#ffd479">▮ '+tip('dyn_notch','dyn_notch')+'</span>'+
         (ns.motor?'<span data-hl="motor" style="color:#ff9a6a">▮ '+tip('motor_harmonics',T('leg_motor'))+'</span>':''));
       box.appendChild(nleg);
+      // per-pass overlay legend (only the extra passes; the primary is the blue/teal pair above)
+      { const ps=[...NSEL].filter(i=>i!==PRIMARY);
+        if (ps.length) box.appendChild(el('div','legend',
+          ps.map(i=>'<span style="color:'+PAL[i%PAL.length]+'">— P'+PASSES[i].n+' '+(LANG==='fr'?'brut/filtré':'raw/filt')+'</span>').join('')
+          +'<span style="color:#8893a5">'+(LANG==='fr'?'(dB relatif au plancher propre à chaque passe)':'(dB relative to each pass’s own floor)')+'</span>')); }
       // legend hover -> emphasise on the PSD plot: LPF cut-off lines, dyn_notch min–max, motor-harmonic bands
       bindHL(nleg,[{ov:NC.ov,h:H3}], name=>{
         if(name==='gyro'){ if(CFG.gyro_lpf1&&CFG.gyro_lpf1.dyn){ emphV(NC.ov,H3,CFG.gyro_lpf1.dyn[0],fmin,fmax,'#5a9bd4'); emphV(NC.ov,H3,CFG.gyro_lpf1.dyn[1],fmin,fmax,'#5a9bd4','gLPF1'); } if(CFG.gyro_lpf2) emphV(NC.ov,H3,CFG.gyro_lpf2.static,fmin,fmax,'#79c0ff','gLPF2'); }
@@ -805,6 +932,13 @@ function render() {
           dleg+='<span style="color:#ff9a6a">— '+T('leg_motor_out')+'</span>'; }
         dleg+='<span style="color:#7e8aa0">-- '+T('leg_floor')+'</span><span style="color:#ff8a80">-- '+T('leg_resid')+'</span>';
         box.appendChild(el('div','legend',dleg));
+        // D-term SNR (pre-filter, gyroUnfilt derivative): useful D (<100 Hz) vs amplified noise (>100 Hz),
+        // per axis. Higher = more headroom to raise/disable dterm_lpf2. Read off the gyro noise axes.
+        { const NAX=ns0.axes||{}, sn=[];
+          for (const a of ['roll','pitch','yaw']) { const v=NAX[a]&&NAX[a].dterm_snr_db;
+            if (v!=null) sn.push('<span style="color:'+AXC[a]+'">'+a+' '+v.toFixed(1)+' dB</span>'); }
+          if (sn.length) box.appendChild(el('div','legend',
+            tip('dterm_snr',T('snr_lbl'))+' '+sn.join('')+'<span style="color:#8893a5">'+T('snr_hint')+'</span>')); }
         box.appendChild(el('div','legend',T('dterm_cap').replace('{psd}',tip('dterm_psd','PSD'))));
       }
     } // noise_spectrum
@@ -1019,6 +1153,15 @@ function render() {
     for (const o of ser) plotLine(p,Hh,o.p.freq,o.p.phase_deg.map(wrap),o.p.coherence,fmin,fmax,-360,0,PAL[o.i%PAL.length],{dim:!o.primary, lw:o.primary?2.2:1.5});
     vline(p,Hh,fms,fmin,fmax,'#ffab40','f(Ms)');
 
+    // register this axis's overlays + per-pass emphasis closures for the pass-pill hover highlight
+    HL.ovs.push({ov:CH.ov,h:Hh-30},{ov:G.ov,h:Hh},{ov:P.ov,h:Hh});
+    for (const o of ser) { const col=PAL[o.i%PAL.length], pp=o.p;
+      (HL.fns[o.i]||(HL.fns[o.i]=[])).push(()=>{
+        plotLine(CH.ov,Hh-30,pp.freq,pp.coherence,pp.coherence,fmin,fmax,0,1,col,{emph:true});
+        plotLine(G.ov,Hh,pp.freq,pp.gain_db,pp.coherence,fmin,fmax,gmin,gmax,col,{emph:true});
+        plotLine(P.ov,Hh,pp.freq,pp.phase_deg.map(wrap),pp.coherence,fmin,fmax,-360,0,col,{emph:true});
+      }); }
+
     // gain-legend hover -> emphasise the filter. f(Ms) is a shared marker: echo it on BOTH gain and
     // phase (the vertical line is aligned across the two plots), the rest only on the gain plot.
     bindHL(gainH,[{ov:G.ov,h:Hh},{ov:P.ov,h:Hh}], name=>{
@@ -1147,7 +1290,7 @@ function render() {
       let xmax=0, ymax=1.0; sser.forEach(o=>{ xmax=Math.max(xmax,o.p.step.t_ms[o.p.step.t_ms.length-1]); ymax=Math.max(ymax,...o.p.step.y); });
       if (d.step.y_hi) ymax=Math.max(ymax,...d.step.y_hi);
       ymax=Math.ceil(ymax/0.25)*0.25;
-      let st=mkCanvas(box,Hh).getContext('2d');
+      const ST=mkCanvasHL(box,Hh), st=ST.ctx;
       drawAxesLin(st,Hh,xmax,0,ymax,'step',0.25,10);   // minor gridlines every 10 ms
       hline(st,Hh,1,0,ymax,'#5a6273','1.0');
       // rise time is measured 10% → 90% of the final value; show those two thresholds (labels left,
@@ -1159,6 +1302,11 @@ function render() {
       if (d.step.y_lo && !HIDDEN.has(PRIMARY)) plotBandLin(st,Hh,d.step.t_ms,d.step.y_lo,d.step.y_hi,xmax,0,ymax,PCOL);
       for (const o of sser) plotLin(st,Hh,o.p.step.t_ms,o.p.step.y,xmax,0,ymax,PAL[o.i%PAL.length],{dim:!o.primary, lw:o.primary?2.2:1.5});
       stepInset(st,Hh,sser,d,PCOL);   // zoomed incrustation on the rise/overshoot (lower-right)
+      // register the step plot for the pass-pill hover highlight (same registry as the Bode plots):
+      // hovering a pass pill now also emphasises that pass's step curve, bold + glowing, on this overlay.
+      HL.ovs.push({ov:ST.ov,h:Hh});
+      for (const o of sser) { const col=PAL[o.i%PAL.length], sp=o.p;
+        (HL.fns[o.i]||(HL.fns[o.i]=[])).push(()=>plotLin(ST.ov,Hh,sp.step.t_ms,sp.step.y,xmax,0,ymax,col,{emph:true})); }
       const mt=d.step&&d.step.metrics;
       if (mt) box.appendChild(el('div','legend',T('metrics').replace('{ov}',mt.overshoot_pct).replace('{rise}',mt.rise_ms==null?'–':mt.rise_ms).replace('{settle}',mt.settle_ms==null?'–':mt.settle_ms)));
     }
@@ -1177,7 +1325,7 @@ function render() {
   // ---- Glossary ----
   {
     const order=['chirp','gain','phase','sensitivity','comp_sensitivity','phase_margin','crossover','coherence','resonance',
-      'noise_psd','dterm_psd','motor_harmonics','filtering','gyro_lpf','dterm_lpf','dyn_notch','rpm_filter','dmax','pid','feedforward','throttle_map','spectrogram','step_response','propwash'];
+      'noise_psd','dterm_psd','dterm_snr','motor_harmonics','filtering','gyro_lpf','dterm_lpf','dyn_notch','rpm_filter','dmax','pid','feedforward','throttle_map','spectrogram','step_response','propwash'];
     const box=el('div','axis'); root.appendChild(box);
     let s='<details class="coll"><summary class="collh2"><span class=sicon>📖</span>'+T('glossary_h')+'</summary><dl class=glos>';
     // entries sorted alphanumerically by their displayed term name (in the active language)

@@ -152,6 +152,24 @@ def test_filter_corners_lowest_lpf_wins():
     assert chirp._filter_corners(cfg, 8000.0)["corner"] == 180.0
 
 
+def test_analytic_group_delay_decreases_with_higher_cutoff():
+    """Analytic in-band group delay falls as the LPF cutoff rises (less filtering = less lag),
+    and a higher-order type adds more lag — the physical ordering the FRF estimate failed on."""
+    gd = lambda fc, order=1.0: chirp._lpf_group_delay_ms([(fc, order)], 90.0)
+    assert gd(700) < gd(500) < gd(250) < gd(120)          # higher cutoff → less delay
+    assert gd(250, 2.0) > gd(250, 1.0)                    # PT2 (order 2) > PT1
+    assert chirp._lpf_group_delay_ms([], 90.0) is None    # no stage → None
+
+
+def test_corners_group_delay_lower_cutoff_means_more_lag():
+    """`_filter_corners` carries an analytic `group_delay_ms`; a lighter filter (higher gyro_lpf2)
+    yields a smaller delay than a heavier one — the report5-vs-report6 case."""
+    light = chirp._filter_corners({"gyro_lpf2": {"static": 700, "type": "PT1"}}, 8000.0)
+    heavy = chirp._filter_corners({"gyro_lpf1": {"dyn": [200, 400], "type": "PT1"},
+                                   "gyro_lpf2": {"static": 400, "type": "PT1"}}, 8000.0)
+    assert light["group_delay_ms"] < heavy["group_delay_ms"]
+
+
 def test_filter_corners_missing_keys_degrade():
     """No config / empty config / no usable cutoff -> None (clean degrade to the old path)."""
     assert chirp._filter_corners(None, 8000.0) is None

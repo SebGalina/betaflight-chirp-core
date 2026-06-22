@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-22
+
+### Added
+- Analysis: `_lpf_group_delay_ms()` — analytic mean in-control-band group delay (ms) of the gyro
+  low-pass cascade, derived from the (known) filter config: deterministic, order-aware (PT1/PT2/PT3/
+  BIQUAD), and identical across axes. `_filter_corners()` now carries `group_delay_ms`.
+- Analysis: `_dterm_snr_db()` — D-term signal/noise ratio (dB) from the **pre-filter** (gyroUnfilt)
+  spectrum, splitting f²-weighted derivative power at 100 Hz (useful D motion below, amplified noise
+  above). Higher = more headroom to raise/disable `dterm_lpf2`. Surfaced per pass as `dterm_snr_db`,
+  with a new glossary entry (`dterm_snr`) and an evolution tile (★ on the best pass).
+- Renderer: per-pass gyro raw/filtered PSD overlay on the noise panel keeps non-primary passes'
+  curves (report.py slims those passes to the per-axis curves + D-term SNR instead of dropping
+  `noise_spectrum` entirely).
+
+### Changed
+- Analysis: **Preservation (P)** now comes from the analytic config-derived group delay as the
+  primary metric instead of the measured FRF group delay, which was noisy / non-stationary and could
+  swing negative axis-to-axis. The measured FRF lag is retained as a guard-rail (`phase_lag_frf_ms`).
+  FRF group delay is now a robust linear phase-vs-ω fit (clamped ≥0) rather than a pointwise −dφ/dω.
+- Analysis: block-level P / phase-lag aggregation uses the **median** across axes (one filter shared
+  by all axes → per-axis spread is measurement noise; one bad axis can no longer drag the verdict).
+
+### Fixed
+- Renderer: gyro noise PSD panel — deselecting the primary pass's pill now actually hides its curve.
+  The primary curve (and its peak dots / legend entry) was drawn unconditionally, ignoring the
+  `NSEL` toggle set, so the last/primary pass could not be hidden.
+
 ## [0.2.0] - 2026-06-19
 
 ### Changed

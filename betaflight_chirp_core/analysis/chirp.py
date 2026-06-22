@@ -788,6 +788,28 @@ def _fq_compose(A: float | None, P: float | None, *, alpha_steep: bool = False):
     return score, _fq_verdict(A, P), "high", None     # verdict from A/P directly, not the score
 
 
+# filter "order" (group-delay multiplier vs a single PT1) by Betaflight low-pass type
+_LPF_ORDER = {"PT1": 1.0, "PT2": 2.0, "PT3": 3.0, "BIQUAD": 1.41}  # BIQUAD ≈ √2/ωc at DC
+
+
+def _lpf_group_delay_ms(stages: list, f_ctrl_max: float) -> float | None:
+    """Analytic mean group delay (ms) of a cascade of low-pass stages over the control band.
+
+    A 1st-order PT1 of cutoff fc has group delay τ(f) = (1/ωc)/(1+(2πf/ωc)²), ωc=2π·fc; PTn ≈ n·that
+    (n cascaded stages add); BIQUAD ≈ √2/ωc at DC. Cascaded stages' delays add. Averaged over
+    [FQ_FMIN_PRES, f_ctrl_max]. ``stages`` = [(fc_hz, order), …]. Returns None if no stage."""
+    stages = [(fc, order) for fc, order in stages if fc and fc > 0]
+    if not stages:
+        return None
+    grid = np.linspace(FQ_FMIN_PRES, max(f_ctrl_max, FQ_FMIN_PRES + 1.0), 16)
+    w = 2.0 * np.pi * grid
+    tau = np.zeros_like(grid)
+    for fc, order in stages:
+        wc = 2.0 * np.pi * float(fc)
+        tau += order * (1.0 / wc) / (1.0 + (w / wc) ** 2)
+    return float(np.mean(tau)) * 1e3
+
+
 def _filter_corners(config: dict, fs: float) -> dict | None:
     """Effective GYRO-side filter corner frequencies for the quiet-window noise spectrum.
 
@@ -799,23 +821,30 @@ def _filter_corners(config: dict, fs: float) -> dict | None:
       - gyro_lpf2 is a static second stage.
       - dyn_notch sweeps between min/max (carried through for context, not part of the LPF corner).
 
-    Returns {lpf1, lpf2, notch_min, notch_max, corner} (Hz) or None if nothing usable. ``corner``
-    is the lowest active low-pass cutoff — where the broadband roll-off actually begins.
+    Returns {lpf1, lpf2, notch_min, notch_max, corner, group_delay_ms} (Hz/ms) or None if nothing
+    usable. ``corner`` is the lowest active low-pass cutoff; ``group_delay_ms`` is the analytic
+    in-control-band group delay of the gyro LPF cascade (deterministic, the robust preservation
+    metric — the measured FRF group delay is noisy/non-stationary, see _filter_phase_cost).
     """
     if not config:
         return None
     g1 = config.get("gyro_lpf1") or {}
     dyn = g1.get("dyn") or []
     lpf1 = (dyn[0] if dyn else None) or g1.get("static")     # lower dynamic bound, else static
-    lpf2 = (config.get("gyro_lpf2") or {}).get("static")
+    g2 = config.get("gyro_lpf2") or {}
+    lpf2 = g2.get("static")
     dn = config.get("dyn_notch") or {}
     notch_min, notch_max = dn.get("min"), dn.get("max")
     lpfs = [v for v in (lpf1, lpf2) if v and v > 0]
     corner = float(min(lpfs)) if lpfs else None
     if corner is None and notch_min is None and notch_max is None:
         return None
-    return {"lpf1": lpf1, "lpf2": lpf2, "notch_min": notch_min,
-            "notch_max": notch_max, "corner": corner}
+    f_ctrl_max = min(corner, FQ_F_CTRL_MAX) if corner else FQ_F_CTRL_MAX
+    stages = [(lpf1, _LPF_ORDER.get((g1.get("type") or "PT1").upper(), 1.0)),
+              (lpf2, _LPF_ORDER.get((g2.get("type") or "PT1").upper(), 1.0))]
+    group_delay_ms = _lpf_group_delay_ms(stages, f_ctrl_max)
+    return {"lpf1": lpf1, "lpf2": lpf2, "notch_min": notch_min, "notch_max": notch_max,
+            "corner": corner, "group_delay_ms": group_delay_ms}
 
 
 def _filter_phase_cost(sig_raw: np.ndarray, sig_filt: np.ndarray, fs: float, nperseg: int,
@@ -838,11 +867,16 @@ def _filter_phase_cost(sig_raw: np.ndarray, sig_filt: np.ndarray, fs: float, npe
     band = (fr >= FQ_FMIN_PRES) & (fr <= f_ctrl_max) & (coh > FQ_COH_GATE)
     if int(band.sum()) < 3:
         return None
-    # group delay tau(f) = -dphi/domega; phase already unwrapped (deg) by _frf
-    tau = -np.gradient(np.unwrap(np.deg2rad(ph)), 2.0 * np.pi * fr)
+    # Group delay via a robust LINEAR fit of unwrapped phase vs ω over the band (slope = mean group
+    # delay), not a pointwise -dφ/dω which is dominated by phase jitter when the filter barely acts.
+    # Clamp ≥0: a causal filter cannot have negative group delay (negatives = pure measurement noise).
+    w = 2.0 * np.pi * fr
+    phr = np.unwrap(np.deg2rad(ph))
+    slope = float(np.polyfit(w[band], phr[band], 1)[0])
+    tau_ms = max(0.0, -slope) * 1e3
     droop_i = int(np.argmin(np.abs(fr - f_ctrl_max)))
     return {
-        "phase_lag_ms": float(np.mean(tau[band])) * 1e3,
+        "phase_lag_ms": tau_ms,
         "mag_droop_db": float(gdb[droop_i]),
         "coherence": float(np.mean(coh[band])),
     }
@@ -999,21 +1033,29 @@ def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
                 if denom > 0.0:
                     A = min(max(1.0 - float(ef.sum()) / denom, 0.0), 1.0)
 
-    # --- Preservation P (Phase 3): phase cost of the filter in the control band. The magnitude
-    # ratio is a poor proxy; the real cost is group delay added where the loop still acts. When
-    # time signals are available, P comes from that. Otherwise fall back to a corner-bounded
-    # magnitude ratio over [FQ_FMIN_PRES..min(f_split, f_ctrl_max)].
+    # --- Preservation P (Phase 3): phase cost of the filter in the control band — the group delay
+    # it adds where the loop still acts. PRIMARY = analytic delay from the (known) gyro filter
+    # config: deterministic and identical across axes, so immune to the FRF phase noise that made
+    # the measured group delay swing wildly / go negative axis-to-axis. The measured FRF lag is
+    # kept as a guard-rail (phase_lag_frf_ms). Magnitude ratio is a last resort when neither exists.
     phase = _filter_phase_cost(sig_raw, sig_filt, fs, nperseg, f_ctrl_max) if nperseg else None
+    analytic_ms = corners.get("group_delay_ms") if corners else None
     P: float | None = None
-    phase_lag_ms = mag_droop_db = None
+    phase_lag_ms = mag_droop_db = phase_lag_frf_ms = None
     if phase is not None:
-        phase_lag_ms = round(phase["phase_lag_ms"], 3)
+        phase_lag_frf_ms = round(phase["phase_lag_ms"], 3)
         mag_droop_db = round(phase["mag_droop_db"], 2)
+    if analytic_ms is not None:
+        phase_lag_ms = round(analytic_ms, 3)
+        pp = _ramp(analytic_ms, FQ_PHASE_GOOD_MS, FQ_PHASE_BAD_MS)
+        P = round(pp / 100.0, 3) if pp is not None else None
+    elif phase is not None:
+        phase_lag_ms = phase_lag_frf_ms
         pp = _ramp(phase["phase_lag_ms"], FQ_PHASE_GOOD_MS, FQ_PHASE_BAD_MS)
         P = round(pp / 100.0, 3) if pp is not None else None
     elif not fallback:
-        # corner-bounded magnitude preservation (no phase data): only trustworthy once the band
-        # is anchored on a real split/corner; in fallback the band is meaningless → leave P None.
+        # corner-bounded magnitude preservation (no phase data at all): only trustworthy once the
+        # band is anchored on a real split/corner; in fallback the band is meaningless → leave None.
         p_hi = min(f_split, f_ctrl_max)
         pb = (f >= FQ_FMIN_PRES) & (f <= p_hi)
         if int(pb.sum()) >= 3:
@@ -1041,7 +1083,8 @@ def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
         "fallback": fallback,
         "excess_present": excess_present,
         "masked_bins_count": masked_bins_count,
-        "phase_lag_ms": phase_lag_ms,
+        "phase_lag_ms": phase_lag_ms,            # analytic (config) when available, else FRF
+        "phase_lag_frf_ms": phase_lag_frf_ms,    # measured FRF group delay (guard-rail / reference)
         "mag_droop_db": mag_droop_db,
         "confidence": confidence,
         "recommendation": recommendation,
@@ -1066,8 +1109,10 @@ def _filter_quality_block(noise: dict) -> dict:
         vals = [v[key] for v in per.values() if v.get(key) is not None]
         return round(float(agg(vals)), nd) if vals else None
 
-    mean_A = _mean("score_attenuation")
-    mean_P = _mean("score_preservation")
+    mean_A = _mean("score_attenuation")              # real per-axis variation → mean
+    # P / phase lag come from one filter shared by all axes, so the per-axis spread is measurement
+    # noise — aggregate with the MEDIAN (one bad axis can't drag the verdict, the report5 bug).
+    mean_P = _mean("score_preservation", np.median)
     # Recompose the mean verdict from mean A/P with the SAME Phase-5 logic as per axis, so the
     # block can't disagree with its own rows (a preservation-only mean must not read as "tighten").
     all_steep = mean_A is None and all(v.get("alpha_regime") == "steep" for v in per.values())
@@ -1077,7 +1122,8 @@ def _filter_quality_block(noise: dict) -> dict:
         "score_attenuation": mean_A,
         "score_preservation": mean_P,
         "f_split_hz": _mean("f_split_hz", np.median, 1),
-        "phase_lag_ms": _mean("phase_lag_ms"),
+        "phase_lag_ms": _mean("phase_lag_ms", np.median),
+        "phase_lag_frf_ms": _mean("phase_lag_frf_ms", np.median),
         "confidence": confidence,
         "recommendation": recommendation,
     }
@@ -1133,6 +1179,8 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
         sig_filt = sp_signal.detrend(df.loc[m, gcol].to_numpy(float))
         fq = _filter_quality(f, raw_lin, filt_lin, fs, corners=corners,
                              sig_raw=sig_raw, sig_filt=sig_filt, nperseg=nperseg)
+    # D-term SNR from the pre-filter (gyroUnfilt) spectrum — full band, before the fmin crop below.
+    snr_d = _dterm_snr_db(f, raw_lin, fmax) if has_unfilt else None
     raw = 10.0 * np.log10(raw_lin + 1e-10)
     filt = 10.0 * np.log10(filt_lin + 1e-10)
     sel = (f >= fmin) & (f <= fmax)
@@ -1175,6 +1223,7 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
         "filt_db": [round(float(v), 1) for v in filt[::step]],
         "peaks": peaks,
         **({"filter_quality": fq} if fq else {}),
+        **({"dterm_snr_db": snr_d} if snr_d is not None else {}),
     }
 
 
@@ -1250,6 +1299,34 @@ def _dterm_motor_spectrum(df: pd.DataFrame, fs: float, quiet_for, quiet_primary:
             out["motor"] = mt
 
     return out if out["axes"] or out.get("motor") else {}
+
+
+DTERM_SNR_SPLIT_HZ = 100.0   # boundary: useful D (reaction to real motion) below, derivation noise above
+DTERM_SNR_FMIN_HZ = 10.0     # ignore sub-10 Hz drift / detrend residual in the signal band
+
+
+def _dterm_snr_db(f: np.ndarray, raw_lin: np.ndarray, fmax: float,
+                  split: float = DTERM_SNR_SPLIT_HZ, fmin: float = DTERM_SNR_FMIN_HZ) -> float | None:
+    """D-term signal/noise ratio (dB) from the RAW (pre-filter) gyro spectrum.
+
+    The D path differentiates the gyro, so its power spectrum is the gyro PSD weighted by (2*pi*f)^2.
+    Split that derivative power at `split` Hz: below = the useful D reaction to real stick / airframe
+    motion, above = the broadband noise the derivative amplifies (what the D-term LPFs exist to kill).
+    A high ratio means little of the D path is noise -> headroom to raise or disable dterm_lpf2.
+    The (2*pi)^2 constant cancels in the ratio, so we weight by f^2 directly. Computed from gyroUnfilt
+    (pre-filter), so it reflects the noise the LPF *would* see, not what survives the current filter.
+    """
+    f = np.asarray(f, float)
+    w = (f ** 2) * np.asarray(raw_lin, float)
+    lo = (f >= fmin) & (f < split)
+    hi = (f >= split) & (f <= fmax)
+    if int(lo.sum()) < 3 or int(hi.sum()) < 3:
+        return None
+    s = float(trapezoid(w[lo], f[lo]))
+    n = float(trapezoid(w[hi], f[hi]))
+    if s <= 0.0 or n <= 0.0:
+        return None
+    return round(10.0 * np.log10(s / n), 1)
 
 
 def _worst_residual_db(noise: dict) -> float | None:
