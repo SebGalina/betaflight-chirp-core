@@ -188,6 +188,120 @@ def _diagnose(m: dict) -> list[str]:
     return hints or ["Step response looks clean"]
 
 
+def _deconv_window(sp: np.ndarray, gy: np.ndarray, fs: float,
+                   horizon_ms: float, reg: float = 1e-4) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Wiener deconvolution of one window: step = cumsum(irfft(Sgy·conj(Ssp)/(|Ssp|²+reg))).
+
+    Returns (t_ms, step_norm, steady) trimmed to horizon_ms, or None if unusable. The step is
+    normalised to its steady state (mean of the last 30% of the FULL window before trimming).
+    """
+    sp = sp_signal.detrend(sp.astype(float))
+    gy = sp_signal.detrend(gy.astype(float))
+    Ssp = np.fft.rfft(sp)
+    Sgy = np.fft.rfft(gy)
+    denom = (np.abs(Ssp) ** 2)
+    H = (Sgy * np.conj(Ssp)) / (denom + reg * float(np.max(denom) or 1.0))
+    h = np.fft.irfft(H, n=len(sp))
+    step = np.cumsum(h)
+    n = len(step)
+    steady = float(np.mean(step[int(0.7 * n):]))
+    if abs(steady) < 1e-9:
+        return None
+    step = step / steady
+    t_ms = np.arange(n) * 1000.0 / fs
+    keep = t_ms <= horizon_ms
+    return t_ms[keep], step[keep], steady
+
+
+def analyse_flight(
+    df: pd.DataFrame,
+    fs: float,
+    axes_filter=None,
+    win_s: float = 1.0,
+    horizon_ms: float = 150.0,
+    small_band=(20.0, 150.0),
+    large_min: float = 250.0,
+    exclude_mask=None,
+) -> dict:
+    """Amplitude-binned, stacked step response from normal flight (PIDtoolbox-style).
+
+    Unlike the chirp-FRF step (a single linear closed-loop response), this slices the flight
+    into windows, deconvolves each setpoint->gyro window, and stacks them in two amplitude bins
+    (small vs large stick steps). The split reveals non-linearity the linear FRF step hides:
+    feedforward saturation, anti-gravity, iterm-relax. Each bin returns the median curve + a
+    min/max confidence band built from the real windows (not a coherence proxy).
+
+    Returns {axis: {"small": {...}|None, "large": {...}|None}} ; an empty axis dict means too
+    little stick activity. Each bin: {t_ms, y, y_lo, y_hi, n, metrics}.
+    """
+    win = int(fs * win_s)
+    if win < 256:
+        return {}
+    # On a chirp log the swept setpoint contaminates the deconvolution; drop any window that
+    # overlaps the excited region so only genuine pilot steps feed the bins (and the score).
+    excl = None if exclude_mask is None else np.asarray(exclude_mask, dtype=bool)
+    out: dict = {}
+    for i, axis in enumerate(AXES):
+        if axes_filter and axis not in axes_filter:
+            continue
+        sp_col, gy_col = SETPOINT_COLS[i], GYRO_COLS[i]
+        if sp_col not in df.columns or gy_col not in df.columns:
+            continue
+        sp_all = df[sp_col].to_numpy(float)
+        gy_all = df[gy_col].to_numpy(float)
+        bins: dict = {"small": [], "large": []}
+        # non-overlapping windows; bin by peak |setpoint| in the window
+        for s in range(0, len(sp_all) - win, win):
+            if excl is not None and bool(excl[s:s + win].any()):
+                continue
+            sp_w = sp_all[s:s + win]
+            peak = float(np.max(np.abs(sp_w)))
+            if small_band[0] <= peak <= small_band[1]:
+                key = "small"
+            elif peak >= large_min:
+                key = "large"
+            else:
+                continue
+            r = _deconv_window(sp_w, gy_all[s:s + win], fs, horizon_ms)
+            if r is None:
+                continue
+            t_ms, step, steady = r
+            # Validity gate: keep only windows that deconvolved to a genuine step — positive DC
+            # gain, a tail that has settled near 1.0, and no runaway ringing. Without this, noisy /
+            # non-step windows (a chirp log has many) produce inverted or wildly ringing curves whose
+            # median is meaningless. A bin that fails to gather enough clean steps falls back to None.
+            if steady <= 0:
+                continue
+            tail = step[int(0.8 * len(step)):]
+            if tail.size == 0 or not (0.6 <= float(np.mean(tail)) <= 1.6):
+                continue
+            if float(np.max(np.abs(step))) > 3.0:
+                continue
+            bins[key].append(step)
+        axis_out: dict = {}
+        t_ref = np.arange(min(int(horizon_ms * fs / 1000.0) + 1, win)) * 1000.0 / fs
+        for key, stack in bins.items():
+            stack = [s for s in stack if len(s) == len(t_ref)]
+            if len(stack) < 3:
+                axis_out[key] = None
+                continue
+            arr = np.vstack(stack)
+            med = np.median(arr, axis=0)
+            lo = np.percentile(arr, 20, axis=0)
+            hi = np.percentile(arr, 80, axis=0)
+            axis_out[key] = {
+                "t_ms": [round(float(v), 1) for v in t_ref],
+                "y": [round(float(v), 3) for v in med],
+                "y_lo": [round(float(v), 3) for v in lo],
+                "y_hi": [round(float(v), 3) for v in hi],
+                "n": len(stack),
+                "metrics": _metrics(t_ref, med),
+            }
+        if any(axis_out.values()):
+            out[axis] = axis_out
+    return out
+
+
 def analyse(
     df: pd.DataFrame,
     fs: float,

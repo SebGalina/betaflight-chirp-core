@@ -68,11 +68,18 @@ Four return surfaces, from raw to ready-to-render:
   "input_col":   "debug[3]",               # FRF input column (chirp setpoint channel)
   "band_hz":     [1.0, 1000.0],            # analysed frequency band [fmin, fmax]
   "throttle_max": 1850,                    # peak flying throttle (or None)
+  "is_chirp":    True,                      # chirp excitation detected? gates step_flight (normal-log only)
+  "frf_reliable": True,                     # is the FRF trustworthy? (coherent band fraction ≥ 0.10)
+  "frf_coherent_frac": 0.30,                # fraction of the band clearing the coherence gate
   "config":      {…},                      # PID / filter settings parsed from the header
   "axes":        {"roll": {…}, "pitch": {…}, "yaw": {…}},   # per-axis, see below
   "tune_score":  {"overall": 76.0, "grade": "B", "axes": {"roll": {"score": …, "subs": {…}}}},
-  "throttle_map":   {…},                   # resonance vs throttle (heatmap payload)
+  "throttle_map":   {…},                   # resonance vs throttle (heatmap payload + motor_orders)
   "noise_spectrum": {…},                   # gyro PSD raw vs filtered (see below)
+  "filter_quality": {…},                   # empirical raw→filtered attenuation/preservation gauge
+  "filter_model":   {…},                   # analytic filter response + group-delay budget (ms) from config
+  "pid_balance":    {"roll": {"pct_p":…, "pct_i":…, "pct_d":…, "err_rms":…, "err_ratio":…}, …},
+  "step_flight":    {"roll": {"small": {…}|None, "large": {…}|None}, …},  # amplitude-binned real-flight step
   "spectrogram":    {…},                   # chirp sweep time×freq (heatmap payload)
   "synthesis":      [{"fr": "...", "en": "..."}, …],   # plain-language read, bilingual
   "filter_suggestions": [ … ],             # filter change hints (only when config present)

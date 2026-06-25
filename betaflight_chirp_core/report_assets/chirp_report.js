@@ -253,8 +253,10 @@ function drawMiniThr(canvas,title,rows,color,opts){
   const L=34,Rr=10,Tt=18,Bb=16;
   ctx.clearRect(0,0,cw,ch); ctx.font='10px sans-serif';
   ctx.fillStyle=color; ctx.fillText(title,4,12);
-  if(!rows||!rows.length){ ctx.fillStyle='#5a6273'; ctx.fillText('—',L,ch/2); return; }
-  let vals=rows.map(r=>r.ms); if(opts.ctx_lo!=null)vals.push(opts.ctx_lo); if(opts.ctx_hi!=null)vals.push(opts.ctx_hi);
+  const VK=opts.valKey||'ms', VL=opts.lbl||'Ms';
+  rows=(rows||[]).filter(r=>r[VK]!=null);
+  if(!rows.length){ ctx.fillStyle='#5a6273'; ctx.fillText('—',L,ch/2); return; }
+  let vals=rows.map(r=>r[VK]); if(opts.ctx_lo!=null)vals.push(opts.ctx_lo); if(opts.ctx_hi!=null)vals.push(opts.ctx_hi);
   let ymin=Math.min(...vals), ymax=Math.max(...vals); if(ymax-ymin<1e-6){ymax+=1;ymin-=1;} const pad=(ymax-ymin)*0.14; ymin-=pad; ymax+=pad;
   let xmin=Math.min(...rows.map(r=>r.throttle_pct)), xmax=Math.max(...rows.map(r=>r.throttle_pct));
   if(xmax-xmin<1){xmax+=5;xmin-=5;} const xp=(xmax-xmin)*0.12; xmin=Math.max(0,xmin-xp); xmax=Math.min(100,xmax+xp);
@@ -263,9 +265,9 @@ function drawMiniThr(canvas,title,rows,color,opts){
   ctx.strokeStyle='#2a2f3a'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(L,Tt); ctx.lineTo(L,ch-Bb); ctx.lineTo(cw-Rr,ch-Bb); ctx.stroke();
   ctx.fillStyle='#8893a5'; ctx.fillText(ymax.toFixed(1),2,Tt+7); ctx.fillText(ymin.toFixed(1),2,ch-Bb+2);
   ctx.strokeStyle=color; ctx.globalAlpha=0.5; ctx.lineWidth=1; ctx.beginPath();
-  rows.forEach((r,i)=>{ const x=xpos(r.throttle_pct),y=ypos(r.ms); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }); ctx.stroke(); ctx.globalAlpha=1;
-  const hp=[]; rows.forEach(r=>{ const x=xpos(r.throttle_pct),y=ypos(r.ms); ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,2.6,0,7); ctx.fill();
-    hp.push({x,y,t:'Ms '+r.ms.toFixed(2)+' @ '+r.throttle_pct.toFixed(0)+'%'+(r.f_ms_hz?' · '+r.f_ms_hz.toFixed(0)+' Hz':'')}); });
+  rows.forEach((r,i)=>{ const x=xpos(r.throttle_pct),y=ypos(r[VK]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }); ctx.stroke(); ctx.globalAlpha=1;
+  const hp=[]; rows.forEach(r=>{ const x=xpos(r.throttle_pct),y=ypos(r[VK]); ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,2.6,0,7); ctx.fill();
+    hp.push({x,y,t:VL+' '+r[VK].toFixed(2)+' @ '+r.throttle_pct.toFixed(0)+'%'+(r.f_ms_hz&&VK==='ms'?' · '+r.f_ms_hz.toFixed(0)+' Hz':'')}); });
   ctx.fillStyle='#8893a5'; ctx.fillText(xmin.toFixed(0)+'%',L-2,ch-4); ctx.fillText(xmax.toFixed(0)+'%',cw-Rr-22,ch-4);
   canvas._hpts=hp; miniHover(canvas);
 }
@@ -345,7 +347,8 @@ const HIDDEN = new Set();   // pass indices whose overlay curves are hidden (pil
 // eye links them at a glance. Filter colours match the Bode overlay (gyro/dterm/notch). ---
 const IND={
   overshoot:{c:'#ff7a6b',p:'▲'}, rise:{c:'#ffc14d',p:'↑'}, settle:{c:'#59c2b0',p:'↓'},
-  margin:{c:'#6fd36f',p:'∠'}, ms:{c:'#b58cff',p:'◎'}, mt:{c:'#e57fb0',p:'⌖'}, noise:{c:'#4fa3e0',p:'≈'}
+  margin:{c:'#6fd36f',p:'∠'}, ms:{c:'#b58cff',p:'◎'}, mt:{c:'#e57fb0',p:'⌖'}, noise:{c:'#4fa3e0',p:'≈'},
+  track_err:{c:'#7fd4c1',p:'εrr'}
 };
 function citem(lbl) {
   if (/P\/I\/D/.test(lbl)) return {c:'#9ecbff',p:'⚙'};
@@ -449,8 +452,19 @@ function render() {
     g.innerHTML=s; root.appendChild(g);
   }
 
+  // FRF reliability: on a log with no real excitation the coherence collapses, so the Bode / Ms /
+  // margin / chirp-step and the composite score are not trustworthy. Show a banner and suppress the
+  // score + evolution; the real-flight blocks (step, noise, P/I/D balance, filter budget) stay.
+  const RELIABLE = PRI.frf_reliable !== false;
+  if (!RELIABLE) {
+    const w=el('div','axis'); w.style.cssText='border:1px solid #b5562e;background:#2a1810';
+    const cohTxt = PRI.frf_coherent_frac!=null ? ' ('+Math.round(PRI.frf_coherent_frac*100)+(LANG==='fr'?' % de bande fiable':'% of band reliable')+')' : '';
+    w.innerHTML='<div style="padding:4px 2px;color:#ffb38a;font-size:13px">'+T('lowcoh_warn').replace('{coh}',cohTxt)+'</div>';
+    root.appendChild(w);
+  }
+
   // ---- TUNE score (composite 0-100 + delta vs previous pass: better/worse after a config change) ----
-  if (PRI.tune_score && PRI.tune_score.overall!=null) {
+  if (RELIABLE && PRI.tune_score && PRI.tune_score.overall!=null) {
     const ts=PRI.tune_score;
     const box=el('div','axis score'); let s='<h2><span class=sicon>🎯</span>'+T('score_h')+'</h2>';
     let dtxt='';
@@ -464,7 +478,7 @@ function render() {
      + '<span class=scoregrade>'+ts.grade+'</span>'+dtxt+'</div>';
     // Per-axis detail as a table: one column per indicator. Labels (header) carry the indicator's
     // colour + pictogram (same identity as the evolution tiles); values stay white, in their own cells.
-    const SUBL={overshoot:'overshoot', rise:T('sc_rise'), margin:T('sc_margin'), ms:'Ms', noise:T('sc_noise')};
+    const SUBL={overshoot:'overshoot', rise:T('sc_rise'), margin:T('sc_margin'), ms:'Ms', noise:T('sc_noise'), track_err:T('sc_track')};
     const subKeys=Object.keys(SUBL).filter(k=>Object.keys(ts.axes).some(ax=>ts.axes[ax].subs[k]!=null));
     let head='<tr><th></th><th style="color:#9ecbff">'+T('score_h')+'</th>';
     for (const k of subKeys) head+='<th style="color:'+IND[k].c+'">'+IND[k].p+' '+SUBL[k]+'</th>';
@@ -490,8 +504,8 @@ function render() {
   }
 
   // ---- Per-axis indicator evolution (right after the score: it shows how each sub-metric moved
-  // pass to pass, backing up the single number above) ----
-  {
+  // pass to pass, backing up the single number above). Suppressed when the FRF is unreliable. ----
+  if (RELIABLE) {
     // One colour AND one pattern (solid) for every axis — the axes are told apart by their labelled
     // row, not by style. A second pattern (dashed) is used only inside the dual tile to separate its
     // two curves. Hover a point to read its value.
@@ -535,7 +549,11 @@ function render() {
         // Ms-vs-throttle mini, right after the Mt tile: Ms per repeat sweep against its mean throttle
         // (TPA cue). Lives in the primary pass; only present when several sweeps span a throttle range.
         const mtr=(PRI.axes[axis]||{}).ms_throttle;
-        if (mtr && mtr.length>=2) drawMiniThr(mkMini(grid,mw,mh), IND.ms.p+' '+T('ms_thr_t'), mtr, IND.ms.c, {ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES});
+        if (mtr && mtr.length>=2) {
+          drawMiniThr(mkMini(grid,mw,mh), IND.ms.p+' '+T('ms_thr_t'), mtr, IND.ms.c, {ctx_lo:1.0, ctx_hi:2.1, zones:MSZONES});
+          // F5 — Mt vs throttle companion (TPA cue on the closed-loop resonance), same per-sweep rows
+          if (mtr.some(r=>r.mt!=null)) drawMiniThr(mkMini(grid,mw,mh), IND.mt.p+' '+T('mt_thr_t'), mtr, IND.mt.c, {valKey:'mt', lbl:'Mt', ctx_lo:1.0, ctx_hi:1.8, zones:MTZONES});
+        }
       }
     }
   }
@@ -639,6 +657,21 @@ function render() {
         if(lab){ctx.fillStyle=col; ctx.fillText(lab,x+2,18);} };
       if (CFG.dyn_notch) { tvl(CFG.dyn_notch.min,'#ffd479','dyn_notch'); tvl(CFG.dyn_notch.max,'#ffd479',''); }
       for (const su of (PRI.filter_suggestions||[])) tvl(su.freq_hz,'#ff8a80','rés');
+      // motor-order lines (eRPM): n× rotation freq per throttle bin -> a line that CLIMBS with throttle
+      // = motor-borne (RPM filter / dyn_notch). Ground truth overlaid on the heatmap.
+      const mo=tm.motor_orders;
+      if (mo && mo.some(v=>v!=null)) {
+        const yC=r=>8+(rows-1-r)*chh+chh/2;
+        for (let n=1;n<=4;n++) {
+          ctx.strokeStyle='rgba(255,154,106,0.85)'; ctx.lineWidth=1.4; ctx.setLineDash([4,3]); ctx.beginPath();
+          let started=false, lastX=null, lastR=null;
+          for (let r=0;r<rows;r++){ const fo=mo[r]; if(fo==null){started=false;continue;} const f=n*fo;
+            if(f<fmin||f>fmax){started=false;continue;} const x=tmx(f), y=yC(r);
+            started?ctx.lineTo(x,y):ctx.moveTo(x,y); started=true; lastX=x; lastR=r; }
+          ctx.stroke(); ctx.setLineDash([]);
+          if(lastX!=null){ ctx.fillStyle='#ff9a6a'; ctx.fillText(n+'×', Math.min(lastX+2,W-22), yC(lastR)-2); }
+        }
+      }
       box.appendChild(el('div','howto','<span class=meta>'+T('tmap_lo')+'</span><span class=scalebar></span><span class=meta>'+T('tmap_hi')+'</span>'));
       box.appendChild(el('div','howto',T('tmap_howto')));
     } else {
@@ -711,6 +744,19 @@ function render() {
       for (const pk of (ns.peaks||[])) { if (pk.freq_hz<fmin||pk.freq_hz>fmax) continue;
         const x=logx(pk.freq_hz,fmin,fmax), y=lerp(pk.above_floor_db,lo,hi,H3-22,8);
         nc.fillStyle='#ffd479'; nc.beginPath(); nc.arc(x,y,2.6,0,7); nc.fill(); }
+      // predicted filtered = measured raw + analytic filter response (config -> expected): validates
+      // that the configured gyro chain actually attenuates as designed. Dashed, only when raw is logged.
+      const FM=PRI.filter_model;
+      if (ns.has_unfilt && FM && FM.gyro && FM.gyro.mag_db) {
+        const FF=FM.freqs, MG=FM.gyro.mag_db;
+        const interp=f=>{ if(f<=FF[0])return MG[0]; if(f>=FF[FF.length-1])return MG[MG.length-1];
+          let j=1; while(j<FF.length&&FF[j]<f)j++; const t=(f-FF[j-1])/((FF[j]-FF[j-1])||1); return MG[j-1]+t*(MG[j]-MG[j-1]); };
+        nc.strokeStyle='#b58cff'; nc.lineWidth=1.3; nc.setLineDash([5,4]); nc.beginPath();
+        for (let i=0;i<F.length;i++){ if(F[i]<fmin||F[i]>fmax)continue;
+          const x=logx(F[i],fmin,fmax), y=lerp(ns.raw_db[i]+interp(F[i]),lo,hi,H3-22,8);
+          i===0?nc.moveTo(x,y):nc.lineTo(x,y); }
+        nc.stroke(); nc.setLineDash([]);
+      }
       // overlay the other selected axes (their filtered PSD — what the loop actually sees), thinner & axis-coloured
       const others=[...sel].filter(a=>a!==primAxis);
       for (const a of others) { const o=NA[a]; if(!o||!o.freqs) continue;
@@ -718,6 +764,7 @@ function render() {
         plotLine(nc,H3,o.freqs,o.filt_db,oo,fmin,fmax,lo,hi,AXC[a],{lw:1.3}); }
       const nleg=el('div','legend',
         (ns.has_unfilt?('<span style="color:#4fc3f7">— '+T('leg_raw')+' ('+primAxis+')</span><span style="color:#80cbc4">— '+T('leg_filt')+'</span>'):'<span style="color:#4fc3f7">— gyro ('+primAxis+')</span>')+
+        ((ns.has_unfilt && PRI.filter_model && PRI.filter_model.gyro)?'<span style="color:#b58cff">┄ '+tip('filter_delay',T('leg_pred'))+'</span>':'')+
         others.map(a=>'<span style="color:'+AXC[a]+'">— '+a+' '+T('noise_axis_other')+'</span>').join('')+
         '<span style="color:#7e8aa0">-- '+T('leg_floor')+'</span>'+
         '<span style="color:#ff8a80">-- '+T('leg_resid')+'</span>'+
@@ -913,12 +960,74 @@ function render() {
       box.appendChild(el('div', 'legend', T('fq_cap')));
     }
 
+    // ── Filter delay budget (analytic config -> group delay) ──────────────────
+    const FMb = PRI.filter_model;
+    if (FMb && ((FMb.gyro&&FMb.gyro.stages.length) || (FMb.dterm&&FMb.dterm.stages.length))) {
+      box.appendChild(el('h3', null, tip('filter_delay', T('fdl_h'))));
+      // one row per stage + a bold total per path
+      const rows=[];
+      const pushPath=(path,col,lbl)=>{ if(!path||!path.stages.length)return;
+        for(const s of path.stages) rows.push({lbl:s.name, fc:s.fc_hz, ms:s.delay_ms, col, bold:false});
+        rows.push({lbl:lbl, ms:path.total_delay_ms, col, bold:true}); };
+      pushPath(FMb.gyro,'#5a9bd4',T('fdl_gyro'));
+      pushPath(FMb.dterm,'#d48fd4',T('fdl_dterm'));
+      const maxMs=Math.max(0.5,...rows.map(r=>r.ms));
+      const ROW=22, HDR=6, BOT=6, Hd=HDR+rows.length*ROW+BOT;
+      const c=mkCanvas(box,Hd).getContext('2d'); c.font='10px sans-serif';
+      const LBLW=92, VCOL=58, bx=PAD+LBLW, bw=W-12-bx-VCOL;
+      for(let i=0;i<rows.length;i++){ const r=rows[i], y0=HDR+i*ROW+3, bh=ROW-8;
+        c.textAlign='right'; c.font=(r.bold?'bold ':'')+'10px sans-serif'; c.fillStyle=r.col;
+        c.fillText(r.lbl,bx-6,y0+bh-1);
+        c.textAlign='left'; c.font='10px sans-serif';
+        c.strokeStyle='#1a1f2b'; c.lineWidth=0.5; c.strokeRect(bx,y0,bw,bh);
+        c.globalAlpha=r.bold?0.85:0.55; c.fillStyle=r.col; c.fillRect(bx,y0,(r.ms/maxMs)*bw,bh); c.globalAlpha=1;
+        c.fillStyle=r.col; c.font=(r.bold?'bold ':'')+'10px sans-serif';
+        c.fillText(r.ms.toFixed(2)+' ms'+(r.fc?'  ('+Math.round(r.fc)+' Hz)':''), bx+bw+5, y0+bh-1);
+        if(r.bold&&i<rows.length-1){ c.strokeStyle='#2a3040'; c.lineWidth=1; c.beginPath(); c.moveTo(PAD,y0+bh+3); c.lineTo(W-12,y0+bh+3); c.stroke(); }
+      }
+      box.appendChild(el('div','legend',T('fdl_cap').replace('{ref}',(FMb.delay_ref_hz||100).toFixed(0))));
+    }
+
     const fsug=PRI.filter_suggestions||[], nsug=PRI.noise_suggestions||[];
     let s='<details class="coll"><summary class="collh">'+tip('resonance',T('filt_h'))+'</summary><ul class="sugg filt">';
     for (const x of fsug) s+='<li>'+loc(x)+'</li>';
     for (const x of nsug) s+='<li>'+loc(x)+'</li>';
     if (!fsug.length && !nsug.length) s+='<li>—</li>';
     s+='</ul></details>'; box.appendChild(el('div',null,s));
+  }
+
+  // ---- PID balance: P/I/D contribution bar per axis + tracking error (F3) ----
+  {
+    const pb=PRI.pid_balance||{};
+    const pbAxes=['roll','pitch','yaw'].filter(a=>pb[a]);
+    if (pbAxes.length) {
+      const box=el('div','axis'); root.appendChild(box);
+      box.appendChild(el('h2',null,'<span class=sicon>⚖️</span>'+tip('pid_balance',T('pidbal_h'))));
+      const ROW=24, HDR=20, BOT=8, Hpb=HDR+pbAxes.length*ROW+BOT;
+      const c=mkCanvas(box,Hpb).getContext('2d'); c.font='10px sans-serif';
+      const LBLW=44, ERRW=92, bx=PAD+LBLW, bw=W-12-bx-ERRW;
+      const PC={p:'#9ecbff',i:'#ffc14d',d:'#d48fd4'};
+      const AX={roll:'#4fc3f7', pitch:'#ffb74d', yaw:'#81c784'};
+      // header legend
+      c.textAlign='left';
+      c.fillStyle=PC.p; c.fillText('P', bx, HDR-7);
+      c.fillStyle=PC.i; c.fillText('I', bx+18, HDR-7);
+      c.fillStyle=PC.d; c.fillText('D', bx+36, HDR-7);
+      c.fillStyle='#8893a5'; c.fillText('err = '+(LANG==='fr'?'erreur de suivi RMS':'tracking error RMS'), bx+bw-bw*0.4, HDR-7);
+      for (let r=0;r<pbAxes.length;r++){ const a=pbAxes[r], e=pb[a], y0=HDR+r*ROW+3, bh=ROW-8;
+        c.textAlign='right'; c.fillStyle=AX[a]; c.font='bold 10px sans-serif'; c.fillText(a,bx-6,y0+bh-1);
+        c.textAlign='left'; c.font='10px sans-serif';
+        let x=bx;
+        for (const [k,col] of [['pct_p',PC.p],['pct_i',PC.i],['pct_d',PC.d]]){ const w=(e[k]||0)/100*bw;
+          c.globalAlpha=0.72; c.fillStyle=col; c.fillRect(x,y0,w,bh); c.globalAlpha=1;
+          if(w>16){ c.fillStyle='#0d1016'; c.fillText(Math.round(e[k])+'%', x+3, y0+bh-2); }
+          x+=w; }
+        c.strokeStyle='#1a1f2b'; c.lineWidth=0.5; c.strokeRect(bx,y0,bw,bh);
+        c.fillStyle='#cfe3ff'; c.fillText('err '+(e.err_rms!=null?e.err_rms:'–')
+          +(e.err_ratio!=null?'  ('+(e.err_ratio*100).toFixed(0)+'%)':''), bx+bw+5, y0+bh-1);
+      }
+      box.appendChild(el('div','legend',T('pidbal_cap')));
+    }
   }
 
   // ---- PID per axis (Bode + step response, all passes overlaid). No standalone section header:
@@ -1141,6 +1250,41 @@ function render() {
       const mt=d.step&&d.step.metrics;
       if (mt) box.appendChild(el('div','legend',T('metrics').replace('{ov}',mt.overshoot_pct).replace('{rise}',mt.rise_ms==null?'–':mt.rise_ms).replace('{settle}',mt.settle_ms==null?'–':mt.settle_ms)));
     }
+
+    // F2 — real-flight step (small vs large amplitude bins), separate panel below the chirp step.
+    // Empirical (deconvolution of real stick steps): the small↔large gap exposes FF/anti-gravity
+    // non-linearity the linear chirp step can't show. Bands = 20–80th percentile across windows.
+    // Shown ONLY on a normal flight log — on a chirp log the chirp-step above is authoritative.
+    const sf=PRI.is_chirp ? null : (PRI.step_flight||{})[axis];
+    if (sf && (sf.small || sf.large)) {
+      box.appendChild(el('h3',null,tip('step_flight',T('stepf_h'))));
+      const SBINS=[['small','#59c2b0',T('stepf_small')],['large','#ffab40',T('stepf_large')]];
+      // y-range from the MEDIAN curves (not the bands) with a hard cap: the real-flight
+      // deconvolution can ring, and an unclamped band would squash the 0–1 region into an
+      // unreadable sliver. Bands are clamped into the view so they stay legible.
+      let sxmax=0, shi=1.0, slo=0;
+      for(const [k] of SBINS){ const b=sf[k]; if(b){ sxmax=Math.max(sxmax,b.t_ms[b.t_ms.length-1]);
+        shi=Math.max(shi,...b.y); slo=Math.min(slo,...b.y); } }
+      shi=Math.min(Math.max(1.5,Math.ceil(shi/0.5)*0.5),3.0);
+      slo=Math.max(Math.min(0,Math.floor(slo/0.5)*0.5),-0.5);
+      const sstep=(shi-slo)<=2.0?0.25:0.5, sclamp=v=>Math.max(slo,Math.min(shi,v));
+      const sfc=mkCanvas(box,Hh).getContext('2d');
+      drawAxesLin(sfc,Hh,sxmax,slo,shi,'step',sstep,10);
+      hline(sfc,Hh,1,slo,shi,'#5a6273','1.0');
+      let sfleg='';
+      for(const [k,col,lbl] of SBINS){ const b=sf[k]; if(!b) continue;
+        plotBandLin(sfc,Hh,b.t_ms,b.y_lo.map(sclamp),b.y_hi.map(sclamp),sxmax,slo,shi,col);
+        plotLin(sfc,Hh,b.t_ms,b.y.map(sclamp),sxmax,slo,shi,col,{lw:2.2});
+        const m=b.metrics||{};
+        sfleg+='<span style="color:'+col+'">— '+lbl+' (n='+b.n+', OS '+(m.overshoot_pct==null?'–':m.overshoot_pct)+'%'
+          +(m.rise_time_ms!=null?', '+(LANG==='fr'?'montée ':'rise ')+m.rise_time_ms+' ms':'')+')</span>  ';
+      }
+      box.appendChild(el('div','legend',sfleg));
+      box.appendChild(el('div','legend',T('stepf_cap')));
+    } else if (!PRI.is_chirp && PRI.step_flight) {
+      box.appendChild(el('h3',null,tip('step_flight',T('stepf_h'))));
+      box.appendChild(el('p','meta',T('stepf_none')));
+    }
     // inter-sweep repeatability: median values are shown above; here is the measured min/max spread
     if (d.n_sweeps) {
       const rg=a=>a&&a[0]!=null?('['+a[0]+'–'+a[1]+']'):'–';
@@ -1156,7 +1300,7 @@ function render() {
   // ---- Glossary ----
   {
     const order=['chirp','gain','phase','sensitivity','comp_sensitivity','phase_margin','crossover','coherence','resonance',
-      'noise_psd','dterm_psd','motor_harmonics','filtering','gyro_lpf','dterm_lpf','dyn_notch','rpm_filter','dmax','pid','feedforward','throttle_map','spectrogram','step_response','propwash'];
+      'noise_psd','dterm_psd','motor_harmonics','filtering','gyro_lpf','dterm_lpf','dyn_notch','rpm_filter','filter_delay','dmax','pid','pid_balance','feedforward','throttle_map','spectrogram','step_response','step_flight','propwash'];
     const box=el('div','axis'); root.appendChild(box);
     let s='<details class="coll"><summary class="collh2"><span class=sicon>📖</span>'+T('glossary_h')+'</summary><dl class=glos>';
     // entries sorted alphanumerically by their displayed term name (in the active language)

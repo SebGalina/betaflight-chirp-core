@@ -29,7 +29,7 @@ def _assemble_report(passes: list, lang: str = "fr") -> dict:
         p["diff"] = config_diff(shown[k - 1]["config"], p["config"]) if k > 0 else ""
         # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light
         if k != primary:
-            for heavy in ("spectrogram", "throttle_map", "noise_spectrum"):
+            for heavy in ("spectrogram", "throttle_map", "noise_spectrum", "step_flight"):
                 p.pop(heavy, None)
     return {"passes": shown, "primary_index": len(shown) - 1, "total_passes": len(passes),
             "lang": lang, "_glossary": GLOSSARY, "_strings": STRINGS}
@@ -284,6 +284,25 @@ GLOSSARY = {
               "eats phase margin. Score is their harmonic mean 2AP/(A+P), penalising the weakest link. "
               "1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
     },
+    "filter_delay": {
+        "fr": "Budget de délai filtre : le retard de groupe ajouté par chaque filtre configuré (gyro LPF1/LPF2, "
+              "D-term LPF1/LPF2, dynamic notch), calculé ANALYTIQUEMENT depuis la config — pas mesuré. Chaque "
+              "filtre passe-bas retarde le signal (retard de groupe) ; ce retard, exprimé en ms, est directement "
+              "comparable au délai de la réponse indicielle et se paie en marge de phase : plus on filtre bas, "
+              "plus le retard monte et plus la marge fond. C'est le pendant prédictif de la jauge de qualité du "
+              "filtrage (qui, elle, mesure l'atténuation réelle a posteriori) : le budget dit ce que la config "
+              "DEVRAIT coûter, la jauge dit ce que le vol a réellement donné. La courbe « prédit » sur le spectre "
+              "de bruit superpose cette même réponse analytique au raw→filtré mesuré, pour valider que le chain "
+              "filtre se comporte comme configuré.",
+        "en": "Filter delay budget: the group delay added by each configured filter (gyro LPF1/LPF2, D-term "
+              "LPF1/LPF2, dynamic notch), computed ANALYTICALLY from the config — not measured. Every lowpass "
+              "delays the signal (group delay); that delay, in ms, is directly comparable to the step-response "
+              "delay and is paid for in phase margin: the lower the cutoff, the more delay and the less margin. "
+              "It is the predictive companion to the filter-quality gauge (which measures the real attenuation "
+              "after the fact): the budget says what the config SHOULD cost, the gauge says what the flight "
+              "actually gave. The 'predicted' curve on the noise spectrum overlays this same analytic response "
+              "onto the measured raw→filtered, to check the filter chain behaves as configured.",
+    },
     "feedforward": {
         "fr": "Feedforward (FF) : un terme qui pousse la commande directement à partir du mouvement du "
               "manche (la dérivée de la consigne), sans attendre que le gyro voie l'erreur. Il accélère la "
@@ -312,6 +331,37 @@ GLOSSARY = {
               "shared oscillation survives). Watch the band above ~200 Hz: that is where heat lives without being "
               "felt on the sticks.",
     },
+    "step_flight": {
+        "fr": "Step vol réel vs step chirp : deux réponses indicielles complémentaires. Le step CHIRP est "
+              "reconstruit de la réponse en fréquence — c'est la réponse LINÉAIRE idéale de la boucle fermée. "
+              "Le step VOL RÉEL est empilé depuis de vrais mouvements de manche (déconvolution consigne→gyro "
+              "fenêtre par fenêtre), trié en deux paquets d'amplitude : PETIT step (petits ordres) et GROS step "
+              "(ordres francs). L'intérêt : l'écart entre petit et gros révèle la NON-LINÉARITÉ que le step "
+              "linéaire cache — saturation du feedforward, anti-gravity, iterm-relax. Si le gros step dépasse "
+              "beaucoup plus que le petit, le FF/anti-gravity sature ; la bande grise = l'étendue réelle sur "
+              "toutes les fenêtres (la dispersion d'un vol à l'autre), pas une incertitude théorique.",
+        "en": "Real-flight step vs chirp step: two complementary step responses. The CHIRP step is reconstructed "
+              "from the frequency response — the ideal LINEAR closed-loop response. The REAL-FLIGHT step is "
+              "stacked from actual stick moves (per-window setpoint→gyro deconvolution), split into two amplitude "
+              "bins: SMALL step (small commands) and LARGE step (sharp commands). The point: the gap between "
+              "small and large reveals the NON-LINEARITY the linear step hides — feedforward saturation, "
+              "anti-gravity, iterm-relax. If the large step overshoots much more than the small one, FF/"
+              "anti-gravity is saturating; the grey band = the real spread across all windows (flight-to-flight "
+              "scatter), not a theoretical uncertainty.",
+    },
+    "pid_balance": {
+        "fr": "Équilibre P/I/D : la part de chaque terme PID dans la commande, mesurée par la RMS de axisP, "
+              "axisI et axisD sur le vol. P domine normalement ; un I trop fort = rebond lent / wind-up ; un D "
+              "élevé = amortissement mais aussi bruit/chaleur. Comparer les axes entre eux repère un axe "
+              "déséquilibré (ex. yaw sans D, c'est normal). L'erreur de suivi (RMS de consigne−gyro, normalisée "
+              "par la consigne) dit à quel point le drone SUIT réellement les ordres : basse = suivi serré. "
+              "Indicateur de confirmation, pas un substitut au ressenti manche.",
+        "en": "P/I/D balance: each PID term's share of the command, from the RMS of axisP, axisI and axisD over "
+              "the flight. P normally dominates; too much I = slow bounce / wind-up; high D = damping but also "
+              "noise/heat. Comparing axes flags an unbalanced one (e.g. yaw with no D is normal). The tracking "
+              "error (RMS of setpoint−gyro, normalised by the setpoint) says how well the drone actually FOLLOWS "
+              "commands: low = tight tracking. A confirmation indicator, not a substitute for stick feel.",
+    },
     "propwash": {
         "fr": "Propwash : les oscillations/secousses quand le drone retombe dans ses propres turbulences "
               "(descentes rapides, sorties de virage). Souvent lié à un D mou ou trop filtré, ou à une "
@@ -328,6 +378,11 @@ STRINGS = {
         "title": "CHIRP ANALYZER", "subtitle": "analyse de réponse fréquentielle · Betaflight",
         "lang_btn": "EN", "pass_word": "Passe",
         "guide_h": "Guide de tuning",
+        "lowcoh_warn": "⚠️ Cohérence trop basse{coh} — aucune excitation chirp détectée. La réponse en "
+                       "fréquence (Bode), Ms, la marge de phase et la note de tune ne sont PAS fiables sur ce "
+                       "log et sont masquées. Les blocs issus du vol réel (step vol, spectre de bruit, équilibre "
+                       "P/I/D, budget de délai filtre) restent valides. Pour un Bode fiable, enregistre un log "
+                       "chirp (debug_mode = CHIRP).",
         "pipe": "Blackbox | Identification fréquentielle | Réponse en fréquence | Phase margin / crossover | Step response simulée | Analyse bruit & filtrage | Scoring | Recommandations",
         "guide_order": "<b>Ordre recommandé :</b> on règle {filt} AVANT {pid}. Chaque filtre ajoute du retard "
                        "de {phase} qui grignote la {pm} : régler les gains avant d'avoir figé le filtrage donne "
@@ -337,7 +392,7 @@ STRINGS = {
         "synth_h": "Lecture d'ensemble", "synth_intro": "D'après la dernière passe",
         "synth_evo": "Évolution depuis la passe 1",
         "score_h": "Note de tune", "score_vs": "vs passe précédente", "score_all": "Toutes les passes :",
-        "sc_rise": "montée", "sc_margin": "marge", "sc_noise": "bruit",
+        "sc_rise": "montée", "sc_margin": "marge", "sc_noise": "bruit", "sc_track": "erreur",
         "score_cap": "Note composite 0–100 (moyenne des axes) : overshoot, montée, marge garantie, Ms et marge "
                      "au bruit, chacun ramené sur 0–100 par une courbe physique puis moyenné (montée et overshoot "
                      "pèsent le plus). Sert à dire si cette config est meilleure ou pire que la précédente — le "
@@ -375,7 +430,7 @@ STRINGS = {
                      "chauffe les moteurs, même si le gyro filtré paraît propre.",
         "leg_dterm_sig": "D-term", "leg_motor_out": "sortie moteur",
         "ff_lbl": "FF", "ff_off": "FF désactivé",
-        "ms_thr_t": "Ms / gaz",
+        "ms_thr_t": "Ms / gaz", "mt_thr_t": "Mt / gaz",
         "fq_h": "Qualité du filtrage",
         "fq_atten": "Atténuation", "fq_pres": "Préservation", "fq_score": "Score global", "fq_mean": "moy.",
         "fq_cap": "Atténuation = suppression bruit HF · Préservation = signal utile conservé · "
@@ -386,6 +441,24 @@ STRINGS = {
         "fq_rec_increase_slight": "Augmenter légèrement D-LPF",
         "fq_rec_increase_strong": "Augmenter D-LPF (bruit HF excessif, risque de chauffe moteur)",
         "fq_rec_insufficient_data": "Données insuffisantes (émergence de bruit non détectée)",
+        "leg_pred": "prédit (config)",
+        "fdl_h": "Budget de délai filtre",
+        "fdl_gyro": "total gyro", "fdl_dterm": "total D-term",
+        "fdl_cap": "Retard de groupe moyen sur 0–{ref} Hz par étage, déduit analytiquement de la config "
+                   "(PT1/PT2/PT3, biquad, notch). Comparable au délai de la step et à la marge de phase : chaque "
+                   "ms ajoutée ronge la marge. À lire avec la jauge de qualité (mesurée) au-dessus — l'une prédit "
+                   "le coût de la config, l'autre mesure le résultat du vol.",
+        "pidbal_h": "Équilibre P/I/D",
+        "pidbal_cap": "RMS de chaque terme PID (axisP/I/D) sur le vol actif → quel terme domine la boucle et "
+                      "l'équilibre inter-axes. err = RMS de l'erreur de suivi (consigne−gyro) ; normalisée par "
+                      "la consigne, elle nourrit la note de tune (poids faible).",
+        "stepf_h": "Réponse indicielle — vol réel (petit / gros step)",
+        "stepf_cap": "Step empilé depuis le vol réel (déconvolution consigne→gyro par fenêtre ; bande = étendue "
+                     "20–80e centile sur N fenêtres). Complète le step-chirp linéaire : l'écart petit↔gros step "
+                     "révèle la non-linéarité (FF, anti-gravity, iterm-relax). Le gros step nourrit la note de "
+                     "tune quand il est propre.",
+        "stepf_small": "petit step", "stepf_large": "gros step",
+        "stepf_none": "indisponible (pas assez de mouvements stick francs hors chirp)",
         "step2_h": "PID",
         "sanity_h": "Contrôle des mesures — balayage du chirp",
         "spectro_cap": "{sg} — gyro {ax} pendant le sweep. La diagonale qui monte = le chirp ; les bandes "
@@ -424,6 +497,10 @@ STRINGS = {
         "title": "CHIRP ANALYZER", "subtitle": "frequency-response analysis · Betaflight",
         "lang_btn": "FR", "pass_word": "Pass",
         "guide_h": "Tuning guide",
+        "lowcoh_warn": "⚠️ Coherence too low{coh} — no chirp excitation detected. The frequency response "
+                       "(Bode), Ms, phase margin and tune score are NOT reliable on this log and are hidden. "
+                       "The real-flight blocks (flight step, noise spectrum, P/I/D balance, filter delay budget) "
+                       "stay valid. For a reliable Bode, record a chirp log (debug_mode = CHIRP).",
         "pipe": "Blackbox | Frequency identification | Frequency response | Phase margin / crossover | Simulated step response | Noise & filtering analysis | Scoring | Recommendations",
         "guide_order": "<b>Recommended order:</b> set {filt} BEFORE {pid}. Every filter adds {phase} lag that "
                        "eats into the {pm}: tuning gains before the filtering is frozen gives PIDs that won't "
@@ -432,7 +509,7 @@ STRINGS = {
         "synth_h": "Overview", "synth_intro": "Based on the latest pass",
         "synth_evo": "Change since pass 1",
         "score_h": "Tune score", "score_vs": "vs previous pass", "score_all": "All passes:",
-        "sc_rise": "rise", "sc_margin": "margin", "sc_noise": "noise",
+        "sc_rise": "rise", "sc_margin": "margin", "sc_noise": "noise", "sc_track": "error",
         "score_cap": "Composite 0–100 score (mean of the axes): overshoot, rise, guaranteed margin, Ms and noise "
                      "margin, each mapped to 0–100 by a physical curve then averaged (rise and overshoot weigh "
                      "most). Tells whether this config is better or worse than the previous one — the delta "
@@ -470,7 +547,7 @@ STRINGS = {
                      "saturates and heats the motors, even when the filtered gyro looks clean.",
         "leg_dterm_sig": "D-term", "leg_motor_out": "motor output",
         "ff_lbl": "FF", "ff_off": "FF off",
-        "ms_thr_t": "Ms / throttle",
+        "ms_thr_t": "Ms / throttle", "mt_thr_t": "Mt / throttle",
         "fq_h": "Filter Quality",
         "fq_atten": "Attenuation", "fq_pres": "Preservation", "fq_score": "Global score", "fq_mean": "mean",
         "fq_cap": "Attenuation = HF noise suppression · Preservation = useful signal retained · "
@@ -481,6 +558,24 @@ STRINGS = {
         "fq_rec_increase_slight": "Slightly increase D-LPF cutoff",
         "fq_rec_increase_strong": "Increase D-LPF cutoff (excessive HF noise — risk of motor heat)",
         "fq_rec_insufficient_data": "Insufficient data (no noise emergence detected)",
+        "leg_pred": "predicted (config)",
+        "fdl_h": "Filter delay budget",
+        "fdl_gyro": "gyro total", "fdl_dterm": "D-term total",
+        "fdl_cap": "Mean group delay over 0–{ref} Hz per stage, derived analytically from the config "
+                   "(PT1/PT2/PT3, biquad, notch). Comparable to the step delay and the phase margin: every added "
+                   "ms eats into the margin. Read alongside the measured quality gauge above — one predicts the "
+                   "config cost, the other measures the flight result.",
+        "pidbal_h": "P/I/D balance",
+        "pidbal_cap": "RMS of each PID term (axisP/I/D) over the active flight → which term dominates the loop "
+                      "and the inter-axis balance. err = tracking-error RMS (setpoint−gyro); normalised by the "
+                      "setpoint, it feeds the tune score (low weight).",
+        "stepf_h": "Step response — real flight (small / large step)",
+        "stepf_cap": "Stacked step from real flight (per-window setpoint→gyro deconvolution; band = 20–80th "
+                     "percentile spread over N windows). Complements the linear chirp step: the small↔large "
+                     "gap reveals non-linearity (FF, anti-gravity, iterm-relax). The large step feeds the tune "
+                     "score when it is clean.",
+        "stepf_small": "small step", "stepf_large": "large step",
+        "stepf_none": "unavailable (not enough sharp stick moves outside the chirp)",
         "step2_h": "PID",
         "sanity_h": "Measurement check — chirp sweep",
         "spectro_cap": "{sg} — {ax} gyro during the sweep. The rising diagonal = the chirp; horizontal "

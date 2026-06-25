@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added (PIDscope-parity)
+- Analysis: `analysis/filter_model.py` — analytic Betaflight filter chain (PT1/PT2/PT3 with the
+  BF cutoff correction, biquad lowpass, dynamic notch) reconstructed from the parsed config.
+  Returns a predicted magnitude curve and a per-stage group-delay budget (ms) for the gyro and
+  D-term paths, averaged over 0–100 Hz. Exposed in `pass["filter_model"]`.
+- Analysis: `pid_balance` block — per-axis RMS contribution of axisP/axisI/axisD (+ percentages)
+  and the tracking error (`err_rms`, plus `err_ratio` = RMS(setpoint−gyro)/RMS(setpoint)).
+- Analysis: `step.analyse_flight` — amplitude-binned, stacked real-flight step response
+  (per-window Wiener deconvolution, small vs large stick bins, 20–80th-percentile band). Each window
+  is gated for validity (positive DC gain, tail settled near 1.0, no runaway ringing). Exposed in
+  `pass["step_flight"]`.
+- Analysis: `pass["is_chirp"]` flag (debug[1] axis flag or debug[0] phase channel). The flight step
+  is computed and shown ONLY on a normal flight log; on a chirp log the closed-loop chirp-FRF step is
+  authoritative and the flight step is suppressed (and does not feed the score).
+- Analysis: `pass["frf_reliable"]` / `frf_coherent_frac` — fraction of the analysed band clearing the
+  coherence gate (a chirp drives a contiguous coherent band, normal flight does not). When too low
+  (< 0.10), the renderer shows a warning banner and suppresses the Bode-derived composite score and
+  the per-axis evolution tiles, since the FRF/Ms/margin are meaningless without excitation. The
+  real-flight blocks (flight step, noise, P/I/D balance, filter-delay budget) stay visible.
+- Analysis: `throttle_map["motor_orders"]` — per-throttle-bin motor rotation fundamental (Hz) from
+  eRPM, for the order lines that climb with throttle. `ms_throttle` entries also carry `mt`.
+- Scoring: new `track_err` sub-score (normalised tracking error, weight 0.05); the real-flight
+  large-step overshoot replaces the chirp-step overshoot in the score when it is a clean step
+  (≥15 windows and a measurable rise time), otherwise the chirp overshoot stands. No double counting.
+- Renderer: filter delay-budget gauge + predicted-attenuation overlay on the noise PSD; motor-order
+  lines on the throttle-map heatmap; P/I/D balance bar block; real-flight step panel (small/large);
+  Mt-vs-throttle companion tile. Glossary entries (`filter_delay`, `step_flight`, `pid_balance`)
+  + FR/EN strings for all new keys.
+
 ## [0.1.9] - 2026-06-18
 
 ### Added
