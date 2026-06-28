@@ -76,26 +76,45 @@ def _notch_ba(fc: float, fs: float, q: float) -> tuple[np.ndarray, np.ndarray]:
 _PTN_ORDER = {"PT1": 1, "PT2": 2, "PT3": 3}
 
 
-def _lpf_ba(cfg_lpf: dict, fs: float) -> tuple[np.ndarray, np.ndarray] | None:
-    """Build (b, a) for one configured LPF stage, or None if disabled/empty.
+def _effective_fc(cfg_lpf: dict) -> float | None:
+    """Active cut-off of an LPF stage in Hz, or None when the stage is OFF.
 
-    A dynamic LPF (`dyn: [lo, hi]`) is evaluated at the mean of its range — a
-    representative operating point for the delay budget.
+    A dynamic LPF (`dyn: [min, max]`) is only enabled when its **min** is > 0 —
+    Betaflight reads `*_dyn_min_hz = 0` as "dynamic disabled, fall back to static".
+    So `dyn=[0, 400]` is NOT a filter at 200 Hz; it means the dynamic LPF is off and
+    the static cut-off applies (and `static = 0` then means the whole stage is off).
+    When enabled, the mean of the range is the representative delay-budget operating
+    point.
     """
     if not cfg_lpf:
         return None
     dyn = cfg_lpf.get("dyn")
-    fc = (sum(dyn) / len(dyn)) if dyn else cfg_lpf.get("static")
-    if not fc or fc <= 0:
+    if dyn and dyn[0] and dyn[0] > 0:
+        fc = sum(dyn) / len(dyn)
+    else:
+        fc = cfg_lpf.get("static")
+    return float(fc) if fc and fc > 0 else None
+
+
+def _lpf_ba(cfg_lpf: dict, fs: float) -> tuple[np.ndarray, np.ndarray] | None:
+    """Build (b, a) for one configured LPF stage, or None if disabled/empty."""
+    fc = _effective_fc(cfg_lpf)
+    if fc is None:
         return None
     typ = (cfg_lpf.get("type") or "PT1").upper()
     if typ == "BIQUAD":
-        return _biquad_lpf_ba(float(fc), fs)
-    return _ptn_ba(float(fc), fs, _PTN_ORDER.get(typ, 1))
+        return _biquad_lpf_ba(fc, fs)
+    return _ptn_ba(fc, fs, _PTN_ORDER.get(typ, 1))
 
 
 def _stage_delay_ms(b: np.ndarray, a: np.ndarray, fs: float) -> float:
-    """Mean group delay (ms) over [0, _DELAY_REF_HZ], the loop-relevant band."""
+    """Median group delay (ms) over [0, _DELAY_REF_HZ], the loop-relevant band.
+
+    Uses the median, not the mean: a notch's group delay has a near-singular spike
+    at its null (group_delay returns a huge-but-finite value there), and that one
+    sample blows up a mean. The median ignores it and reports the delay the loop
+    actually sees across the band — which is ~0 for a notch outside its narrow creux.
+    """
     n = 512
     w = np.linspace(0.0, np.pi * min(1.0, 2.0 * _DELAY_REF_HZ / fs), n)
     try:
@@ -105,7 +124,7 @@ def _stage_delay_ms(b: np.ndarray, a: np.ndarray, fs: float) -> float:
     gd = gd[np.isfinite(gd)]
     if gd.size == 0:
         return 0.0
-    return float(np.mean(gd)) / fs * 1000.0
+    return float(np.median(gd)) / fs * 1000.0
 
 
 def _mag_db(b: np.ndarray, a: np.ndarray, freqs: np.ndarray, fs: float) -> np.ndarray:
@@ -141,7 +160,10 @@ def _path(stage_specs, cfg: dict, freqs: np.ndarray, fs: float,
         fc = dn.get("min")  # representative: the lower edge of the tracked range
         q = dn.get("q")
         if fc and q:
-            b, a = _notch_ba(float(fc), fs, float(q))
+            # Config stores the raw CLI value (`set dyn_notch_q`, e.g. 650); the firmware
+            # uses q/100 as the actual biquad Q (6.5). Without this the modelled notch is
+            # 100x too narrow — wrong magnitude curve and a far sharper delay singularity.
+            b, a = _notch_ba(float(fc), fs, float(q) / 100.0)
             d = _stage_delay_ms(b, a, fs)
             stages.append({"name": "dyn_notch", "type": "NOTCH",
                            "fc_hz": float(fc), "delay_ms": round(d, 2)})
@@ -152,8 +174,9 @@ def _path(stage_specs, cfg: dict, freqs: np.ndarray, fs: float,
 
 
 def _stage_fc(cfg_lpf: dict) -> float | None:
-    dyn = cfg_lpf.get("dyn")
-    return round(sum(dyn) / len(dyn), 0) if dyn else cfg_lpf.get("static")
+    """Displayed cut-off — the active fc (None-safe), consistent with _effective_fc."""
+    fc = _effective_fc(cfg_lpf)
+    return round(fc, 0) if fc is not None else None
 
 
 def build_filter_model(config: dict, fs: float,
