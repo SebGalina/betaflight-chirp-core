@@ -272,16 +272,23 @@ GLOSSARY = {
               "and motor temperature.",
     },
     "filter_quality": {
-        "fr": "Qualité du filtrage — deux angles complémentaires. "
-              "Atténuation (A) : dans quelle mesure le filtre supprime le bruit haute fréquence au-dessus de f_split ; "
-              "sans ça les ESC chauffent. Préservation (P) : dans quelle mesure le signal utile (< f_split) est "
-              "conservé — trop de filtre ajoute du délai et rogne la marge de phase. Le Score est leur moyenne "
-              "harmonique 2AP/(A+P), qui pénalise le maillon le plus faible. "
-              "1.0 = filtrage parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
-        "en": "Filter quality — two complementary angles. "
-              "Attenuation (A): how well the filter suppresses HF noise above f_split — without this ESCs overheat. "
-              "Preservation (P): how well the useful signal (< f_split) is retained — over-filtering adds delay and "
-              "eats phase margin. Score is their harmonic mean 2AP/(A+P), penalising the weakest link. "
+        "fr": "Qualité du filtrage — deux angles complémentaires, séparés à une fréquence FIXE (~90 Hz) entre bande "
+              "de commande et bande de bruit. "
+              "Atténuation (A) : dans quelle mesure le filtre supprime le bruit au-dessus de ~90 Hz ; sans ça les ESC "
+              "chauffent. Comptée seulement s'il y a un bruit à retirer (sinon A = pass, build propre non pénalisé). "
+              "Préservation (P) : dans quelle mesure le signal utile (< ~90 Hz, là où vit la commande) est conservé — "
+              "trop de filtre ajoute du délai et rogne la marge de phase. Le Score est leur moyenne harmonique "
+              "2AP/(A+P) : il culmine au filtrage équilibré et chute des deux côtés (sur-filtré → P baisse, "
+              "sous-filtré → A baisse). La reco vient du terme le plus faible : P bas → réduire le filtre, A bas → "
+              "l'augmenter. 1.0 = parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
+        "en": "Filter quality — two complementary angles, split at a FIXED frequency (~90 Hz) between the control "
+              "band and the noise band. "
+              "Attenuation (A): how well the filter suppresses noise above ~90 Hz — without this ESCs overheat. Only "
+              "counted when there is noise to remove (else A passes, a clean build is not penalised). "
+              "Preservation (P): how well the useful signal (< ~90 Hz, where flight control lives) is retained — "
+              "over-filtering adds delay and eats phase margin. Score is their harmonic mean 2AP/(A+P): it peaks at "
+              "balanced filtering and falls off both ways (over-filtered → P drops, under-filtered → A drops). The "
+              "recommendation comes from the weaker side: low P → reduce filtering, low A → increase it. "
               "1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
     },
     "filter_delay": {

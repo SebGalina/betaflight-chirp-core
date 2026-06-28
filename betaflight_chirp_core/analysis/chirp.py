@@ -670,6 +670,17 @@ FQ_FMIN_FIT = 40.0       # Hz, fit/detection floor — above the low-freq motion
                          # knee a single power law cannot model (else the steep motion
                          # content drags the fit down and the whole low band "emerges")
 FQ_FMIN_PRES = 20.0      # Hz, lower bound of the preservation band (skip the DC pedestal)
+FQ_PRES_CEIL_HZ = 90.0   # Hz, fixed control/noise split: P (preservation) is judged over
+                         # [FQ_FMIN_PRES .. this], A (attenuation) over [this .. Nyquist].
+                         # The useful flight-control signal lives below ~90 Hz; above it the
+                         # band is motor harmonics + broadband noise. A FIXED edge (not the
+                         # old, unstable per-log f_split) keeps the score comparable across
+                         # logs and makes it peak at balanced filtering, fall off toward both
+                         # over- (P drops) and under-filtering (A drops).
+FQ_NOISE_PRESENT_RATIO = 1.4  # raw/background energy above the ceiling must exceed this for
+                              # attenuation to be *applicable*; below it the band is already
+                              # at its natural floor (clean build), nothing to remove, so A is
+                              # not held against the tune (A treated as a pass).
 FQ_SIGMA = 2.0           # clip raw points emerging > this many sigma above the fit
 FQ_RATIO_THRESH = 1.5    # raw/fit emergence ratio that marks the signal "rising"
 FQ_CONSEC = 10           # consecutive points above the ratio to call it f_split
@@ -719,30 +730,47 @@ def _bp_model(x: np.ndarray, b: float, s1: float, s2: float, xb: float) -> np.nd
     return b + s1 * x + (s2 - s1) * np.maximum(x - xb, 0.0)
 
 
-def _fq_reco(score: float) -> str:
-    """Map a filter-quality score [0..1] to a recommendation code (FR/EN in strings)."""
-    if score >= 0.90:
-        return "decrease_strong"
-    if score >= 0.70:
-        return "decrease_slight"
-    if score >= 0.50:
+FQ_GOOD = 0.70           # A or P at/above this = that side is healthy
+FQ_DEFICIT_STRONG = 0.45  # a side this far below 1.0 = a strong push in its direction
+
+
+def _fq_reco(attenuation: float, preservation: float) -> str:
+    """Recommendation code from the two components, not the combined score.
+
+    The score alone can't say which way to move — a low score can mean over- OR
+    under-filtering. Direction comes from *which* component is deficient:
+      low preservation (signal cut)      -> decrease filtering
+      low attenuation  (noise survives)  -> increase filtering
+    When both are healthy it's the sweet spot. Severity scales with the larger
+    deficit. FR/EN text for each code lives in the report strings.
+    """
+    def_over = 1.0 - preservation   # how much useful signal the filter is eating
+    def_lax = 1.0 - attenuation     # how much noise the filter leaves behind
+    if attenuation >= FQ_GOOD and preservation >= FQ_GOOD:
         return "sweet_spot"
-    if score >= 0.30:
-        return "increase_slight"
-    return "increase_strong"
+    if def_over >= def_lax:         # preservation is the weaker side -> over-filtered
+        return "decrease_strong" if def_over >= FQ_DEFICIT_STRONG else "decrease_slight"
+    return "increase_strong" if def_lax >= FQ_DEFICIT_STRONG else "increase_slight"
 
 
 def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
                     fs: float) -> dict | None:
     """Universal filter-quality score in [0,1] from raw vs filtered gyro PSD (linear).
 
-    Fits a power law (PSD ∝ f^-α) to the raw spectrum in log-log, iteratively
-    sigma-clipping points that emerge *above* the fit, so the fit converges on
-    the signal's natural background. ``f_split`` is the first frequency where the
-    raw/fit ratio stays above FQ_RATIO_THRESH for FQ_CONSEC consecutive points;
-    the score is ∫filt / ∫raw over 0..f_split. Returns None if the fit is not
-    feasible. Falls back to fs/4 (with ``fallback=True``) when f_split is out of
-    a plausible 20..fs/3 range.
+    Two reference-independent components over a FIXED control/noise split at
+    ``FQ_PRES_CEIL_HZ``:
+      P (preservation) = ∫filt/∫raw over [FQ_FMIN_PRES .. ceil] — is the control
+                         band (where flight-control signal lives) spared?
+      A (attenuation)  = 1 - ∫filt/∫raw over [ceil .. Nyquist] — is the noise
+                         above it killed? Only counted when there IS removable
+                         noise there (raw exceeds its fitted background by
+                         FQ_NOISE_PRESENT_RATIO); on a clean band A passes (=1).
+    ``score`` is their harmonic mean: it peaks at balanced filtering and falls off
+    toward over-filtering (P drops) and under-filtering (A drops). The power-law
+    fit (alpha, f_knee) and the emergence ``f_split`` are still computed but are
+    informational only — they no longer drive the split (the old per-log f_split
+    was unstable and let the dyn_notch's mid-band noise removal read as lost
+    signal). Returns None if the band integrals are not feasible.
     """
     f = np.asarray(f, float)
     raw = np.asarray(raw_lin, float)
@@ -830,14 +858,17 @@ def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
         f_split = fs / 4.0
         fallback = True
 
-    # Hybrid score. ∫filt/∫raw over the whole useful band [0..f_split] is invalid:
-    # the f^-α pedestal dominates and no real filter touches it, so it pegs at ~1.
-    # Split into two reference-independent components instead:
-    #   A (attenuation)  over [f_split..fmax]: does the filter kill the noise?
-    #   P (preservation)  over [f_low..f_split]: does it spare the useful signal?
-    # The harmonic mean punishes either one failing.
+    # Two reference-independent components over a FIXED control/noise split (not the
+    # old, per-log f_split, which was unstable and let the dyn_notch's mid-band noise
+    # removal masquerade as lost signal):
+    #   P (preservation) over [f_low .. ceil]:  does the filter spare the control band?
+    #   A (attenuation)  over [ceil .. fmax]:   does it kill the noise above it?
+    # The harmonic mean peaks at balanced filtering and falls off toward both
+    # over-filtering (P drops) and under-filtering (A drops). f_split / alpha are
+    # kept below as informational noise-shape fields only.
     fmax = float(f[-1])
     f_low = FQ_FMIN_PRES                       # exclude the DC pedestal from P
+    ceil = min(FQ_PRES_CEIL_HZ, fmax)
 
     def _ratio(lo, hi):
         b = (f >= lo) & (f <= hi)
@@ -848,34 +879,48 @@ def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
             return None
         return float(trapezoid(filt[b], f[b])) / pr
 
-    r_noise = _ratio(f_split, fmax)            # filt/raw in the noise band
-    r_signal = _ratio(f_low, f_split)          # filt/raw in the signal band
+    r_signal = _ratio(f_low, ceil)             # filt/raw in the control band
+    r_noise = _ratio(ceil, fmax)               # filt/raw in the noise band
     if r_noise is None or r_signal is None:
         return None
-    A = min(max(1.0 - r_noise, 0.0), 1.0)      # 1 = perfect attenuation, 0 = filter does nothing
     P = min(max(r_signal, 0.0), 1.0)           # 1 = signal untouched, 0 = signal crushed
+    A_raw = min(max(1.0 - r_noise, 0.0), 1.0)  # 1 = perfect attenuation, 0 = filter does nothing
+
+    # Is there removable noise above the ceiling, or is the band already at its natural
+    # floor? Compare raw energy to the fitted power-law background. On a clean build with
+    # nothing to remove, A_raw would be ~0 (filt ≈ raw) — that must NOT read as "too lax".
+    fit_ok = fm.size >= 20
+    excess_ratio = None
+    noise_present = True
+    if fit_ok:
+        nb = (f >= ceil) & (f <= fmax)
+        if nb.any():
+            bg = 10.0 ** _bp_model(np.log10(f[nb]), b, s1, s2, xb)
+            p_raw = float(trapezoid(raw[nb], f[nb]))
+            p_bg = float(trapezoid(bg, f[nb]))
+            excess_ratio = (p_raw / p_bg) if p_bg > 0.0 else None
+            noise_present = excess_ratio is None or excess_ratio >= FQ_NOISE_PRESENT_RATIO
+    A = A_raw if noise_present else 1.0        # clean band: nothing to attenuate, A passes
+
     score = (2.0 * A * P / (A + P)) if (A + P) > 0.0 else 0.0
     out = {
         "score": round(score, 3),
         "score_attenuation": round(A, 3),
         "score_preservation": round(P, 3),
-        "f_split_hz": round(f_split, 1),
-        "alpha": round(alpha_hf, 2),            # HF (noise-plateau) slope — the meaningful one
+        "pres_ceil_hz": round(ceil, 1),         # the fixed control/noise split used
+        "noise_present": noise_present,         # was attenuation applicable (noise above ceil)?
+        "excess_ratio": round(excess_ratio, 2) if excess_ratio is not None else None,
+        "f_split_hz": round(f_split, 1),        # informational: where noise emerges
+        "alpha": round(alpha_hf, 2),            # HF (noise-plateau) slope
         "alpha_lf": round(alpha_lf, 2),         # low-freq (motion) slope
         "f_knee_hz": round(f_knee, 1),          # breakpoint between the two slopes
-        "fallback": fallback,
+        "fallback": fallback,                   # f_split detection fell back (no emergence)
         "masked_bins_count": masked_bins_count,
+        "confidence": "high",
+        "recommendation": _fq_reco(A, P),
     }
-    # On fallback, f_split is arbitrary (fs/4, no real noise emergence) so the band split
-    # is meaningless — keep A/P/score but withhold the verdict. Not a bug: a clean log with
-    # no detectable emergence often just means the drone is well tuned / well filtered.
-    if fallback:
-        out["confidence"] = "low"
-        out["recommendation"] = "insufficient_data"
-        out["reason"] = "f_split_fallback: no noise emergence detected"
-    else:
-        out["confidence"] = "high"
-        out["recommendation"] = _fq_reco(score)
+    if not noise_present:
+        out["reason"] = "clean_band: no removable noise above the ceiling"
     return out
 
 
@@ -886,21 +931,17 @@ def _filter_quality_block(noise: dict) -> dict:
     if not per:
         return {}
     mean_score = round(float(np.mean([v["score"] for v in per.values()])), 3)
-    # The mean is trustworthy as long as at least one axis had a real emergence;
-    # only when every axis fell back is the verdict withheld.
-    any_high = any(v.get("confidence") == "high" for v in per.values())
+    mean_a = float(np.mean([v["score_attenuation"] for v in per.values()]))
+    mean_p = float(np.mean([v["score_preservation"] for v in per.values()]))
     mean = {
         "score": mean_score,
-        "score_attenuation": round(float(np.mean([v["score_attenuation"] for v in per.values()])), 3),
-        "score_preservation": round(float(np.mean([v["score_preservation"] for v in per.values()])), 3),
+        "score_attenuation": round(mean_a, 3),
+        "score_preservation": round(mean_p, 3),
         "f_split_hz": round(float(np.median([v["f_split_hz"] for v in per.values()])), 1),
-        "confidence": "high" if any_high else "low",
+        "confidence": "high",
+        # Direction from the mean components, like each axis — over- vs under-filtered.
+        "recommendation": _fq_reco(mean_a, mean_p),
     }
-    if any_high:
-        mean["recommendation"] = _fq_reco(mean_score)
-    else:
-        mean["recommendation"] = "insufficient_data"
-        mean["reason"] = "f_split_fallback: no noise emergence detected on any axis"
     return {"axes": per, "mean": mean}
 
 

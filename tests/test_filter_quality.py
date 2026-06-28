@@ -53,9 +53,17 @@ def test_score_has_sweet_spot_and_usable_range():
 
 
 def test_recommendation_codes_cover_table():
-    codes = {chirp._fq_reco(s) for s in (0.95, 0.8, 0.6, 0.4, 0.1)}
-    assert codes == {"decrease_strong", "decrease_slight",
-                     "sweet_spot", "increase_slight", "increase_strong"}
+    # Reco is directional now: derived from (attenuation, preservation), not a scalar.
+    # Low preservation -> decrease filtering; low attenuation -> increase it.
+    cases = {
+        (0.95, 0.30): "decrease_strong",    # signal heavily cut
+        (0.95, 0.60): "decrease_slight",    # signal mildly cut
+        (0.90, 0.90): "sweet_spot",         # both healthy
+        (0.60, 0.95): "increase_slight",    # noise mildly remaining
+        (0.30, 0.95): "increase_strong",    # noise heavily remaining
+    }
+    for (a, p), code in cases.items():
+        assert chirp._fq_reco(a, p) == code, (a, p)
 
 
 def test_fsplit_in_signal_region_or_fallback():
@@ -76,19 +84,24 @@ def test_returns_none_on_too_few_points():
     assert chirp._filter_quality(f, raw, raw, 8000.0) is None
 
 
-def test_fallback_no_verdict():
-    """A pure power-law spectrum (no emerging hump) -> f_split fallback -> withheld verdict."""
+def test_clean_band_attenuation_not_penalised():
+    """No removable noise above the ceiling -> A is a pass, not an 'increase filtering'.
+
+    A pure power-law spectrum already sits at its natural background above the control
+    ceiling: there is nothing to attenuate, so the score must not punish the tune for a
+    low raw attenuation ratio.
+    """
     fs = 8000.0
     f = np.linspace(0.0, fs / 2.0, 2049)
     raw = (f + 2.0) ** -1.8 + 1e-9            # no emergence anywhere
     fq = chirp._filter_quality(f, raw, _lowpass(raw, f, 100.0), fs)
     assert fq is not None
-    assert fq["fallback"] is True
-    assert fq["confidence"] == "low"
-    assert fq["recommendation"] == "insufficient_data"
-    assert "reason" in fq
-    # A/P/score are still computed and kept
-    assert {"score", "score_attenuation", "score_preservation"} <= set(fq)
+    assert fq["noise_present"] is False
+    assert fq["score_attenuation"] == 1.0      # clean band -> attenuation passes
+    assert fq["recommendation"] not in ("increase_slight", "increase_strong")
+    assert "reason" in fq and "clean_band" in fq["reason"]
+    # f_split is still reported as an informational field
+    assert {"score", "score_attenuation", "score_preservation", "f_split_hz"} <= set(fq)
 
 
 def test_aliasing_mask():
@@ -117,11 +130,12 @@ def test_harmonic_mask():
 
 
 def test_clean_signal_no_false_positive():
-    """Ultra-clean signal (white-ish, flat) must not fabricate an emergence/verdict."""
+    """Ultra-clean signal (white-ish, flat) must not be flagged as under-filtered."""
     fs = 8000.0
     f = np.linspace(0.0, fs / 2.0, 2049)
     raw = np.full_like(f, 1e-3) + 1e-9        # flat: no power-law, no peaks
     fq = chirp._filter_quality(f, raw, _lowpass(raw, f, 100.0), fs)
     if fq is not None:
-        assert fq["confidence"] == "low"
-        assert fq["recommendation"] == "insufficient_data"
+        # no excess noise above the ceiling -> attenuation not demanded
+        assert fq["noise_present"] is False
+        assert fq["recommendation"] not in ("increase_slight", "increase_strong")
