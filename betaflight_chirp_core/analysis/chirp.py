@@ -1171,6 +1171,77 @@ def _filter_disable_notes(noise: dict, config: dict) -> list[dict]:
     return out
 
 
+# --- reactivity (freestyle) tuning headroom -------------------------------------
+# Thresholds for "the loop is conservative — there is room to be snappier". An LLM
+# chasing freestyle reactivity reads these instead of re-deriving them from the raw
+# metrics. All deliberately cautious: they flag *available* headroom, not a mandate.
+_MT_OVERDAMPED = 1.05      # closed-loop peak below this = damped, room to raise P
+_MT_SNAPPY = 1.15          # freestyle target band upper edge (Mt ~1.1-1.15)
+_OVERSHOOT_HEADROOM_PCT = 8.0   # step overshoot below this = room before it gets bouncy
+_ERR_RATIO_SLUGGISH = 0.20      # tracking error / setpoint above this = visible lag
+_DTERM_LPF_LOW_HZ = 200.0       # dterm LPF1 upper cut-off below this adds avoidable D lag
+
+
+def _tuning_suggestions(results: dict, noise: dict, config: dict) -> list[dict]:
+    """Reactivity-oriented headroom notes for a freestyle tune ({fr, en} per item).
+
+    Reads the closed-loop peak (Mt), step overshoot, tracking-error ratio and the
+    filter cut-offs to say where the loop is *conservative* and could be pushed for
+    a snappier feel — the gain/filter advice the metric blocks stop short of giving.
+    Empty when nothing has headroom (already aggressive, or no chirp/step to judge).
+    """
+    out: list[dict] = []
+    pids = (config or {}).get("pids") or {}
+    for axis in AXES:
+        d = results.get(axis) or {}
+        if not d:
+            continue
+        mt = d.get("mt")
+        os_pct = ((d.get("step") or {}).get("metrics") or {}).get("overshoot_pct")
+        err = d.get("track_err_ratio")
+        axis_pids = pids.get(axis) or []
+        p_gain = axis_pids[0] if axis_pids else None
+        d_gain = axis_pids[2] if len(axis_pids) >= 3 else None
+        # Damped loop (Mt under ~1.05) with little/no step overshoot = P has room.
+        damped = mt is not None and mt < _MT_OVERDAMPED
+        low_os = os_pct is None or os_pct < _OVERSHOOT_HEADROOM_PCT
+        if damped and low_os:
+            sluggish = err is not None and err > _ERR_RATIO_SLUGGISH
+            pstr = f" (P actuel {p_gain})" if p_gain else ""
+            erf = f" Suivi de consigne mou (err_ratio {err:.2f})." if sluggish else ""
+            ere = f" Setpoint tracking is loose (err_ratio {err:.2f})." if sluggish else ""
+            # Only pair with a D bump on axes that run D (yaw is usually P/I-only).
+            df_clause = " Monter D en parallèle pour garder l'amortissement." if d_gain else ""
+            de_clause = " Raise D alongside to keep the damping." if d_gain else ""
+            out.append({
+                "axis": axis,
+                "fr": f"{axis} — réactivité dispo : Mt {mt:.2f} (<{_MT_OVERDAMPED}) + overshoot "
+                      f"{0.0 if os_pct is None else os_pct:.0f} % = boucle sur-amortie.{erf} Marge pour "
+                      f"monter P ~+10-15 %{pstr} jusqu'à Mt ~{_MT_SNAPPY} / overshoot ~6-8 %.{df_clause}",
+                "en": f"{axis} — reactivity available: Mt {mt:.2f} (<{_MT_OVERDAMPED}) + overshoot "
+                      f"{0.0 if os_pct is None else os_pct:.0f}% = over-damped loop.{ere} Room to raise P "
+                      f"~+10-15%{pstr} toward Mt ~{_MT_SNAPPY} / overshoot ~6-8%.{de_clause}"})
+    # D-term LPF1 cut-off low + clean noise above 150 Hz = the lag is avoidable.
+    d1 = (config or {}).get("dterm_lpf1") or {}
+    d1hi = (d1.get("dyn") or [None, None])[-1] or d1.get("static")
+    freqs = (noise or {}).get("freqs") or []
+    raw = (noise or {}).get("raw_db") or []
+    if d1hi and freqs and raw:
+        above = [r for f, r in zip(freqs, raw) if f >= 150.0]
+        clean = above and max(above) <= RESIDUAL_OK_DB
+        if d1hi < _DTERM_LPF_LOW_HZ and clean:
+            out.append({
+                "fr": f"D-term LPF1 plafonne à {d1hi:.0f} Hz, mais le gyro est déjà au plancher au-dessus de "
+                      f"150 Hz (+{max(max(above),0):.0f} dB) : ce cut-off bas ajoute du retard de phase D sans "
+                      f"rien filtrer d'utile. Le remonter (~{d1hi:.0f}→250-300 Hz) coupe le lag D et laisse "
+                      f"monter D pour plus de réactivité.",
+                "en": f"D-term LPF1 caps at {d1hi:.0f} Hz, but the gyro is already at the floor above 150 Hz "
+                      f"(+{max(max(above),0):.0f} dB): this low cut-off adds D phase lag without filtering "
+                      f"anything useful. Raising it (~{d1hi:.0f}→250-300 Hz) cuts D lag and lets D go higher "
+                      f"for more reactivity."})
+    return out
+
+
 def _motor_harmonics(df: pd.DataFrame, mask: np.ndarray, poles, fmax: float) -> dict:
     """Motor rotation harmonics from eRPM telemetry, over the quiet window.
 
@@ -1215,14 +1286,20 @@ def _pid_balance(df: pd.DataFrame, fs: float) -> dict:
             continue
         rms = lambda c: float(np.sqrt(np.mean(np.square(df.loc[mask, c].to_numpy(float))))) \
             if c in df.columns else 0.0
+        # AC-RMS (mean removed) drives the share split: the I-term carries a large DC
+        # offset (it holds attitude/trim) that raw RMS would count as loop authority,
+        # masking the true P/I/D balance — std() reflects the *active* contribution.
+        acrms = lambda c: float(np.std(df.loc[mask, c].to_numpy(float))) \
+            if c in df.columns else 0.0
         rp, ri, rd = rms(pcol), rms(icol), rms(dcol)
-        tot = rp + ri + rd
+        ap, ai, ad = acrms(pcol), acrms(icol), acrms(dcol)
+        tot = ap + ai + ad
         if tot <= 1e-9:
             continue
         entry = {
             "rms_p": round(rp, 1), "rms_i": round(ri, 1), "rms_d": round(rd, 1),
-            "pct_p": round(100.0 * rp / tot, 0), "pct_i": round(100.0 * ri / tot, 0),
-            "pct_d": round(100.0 * rd / tot, 0),
+            "pct_p": round(100.0 * ap / tot, 0), "pct_i": round(100.0 * ai / tot, 0),
+            "pct_d": round(100.0 * ad / tot, 0),
         }
         spcol, gycol = SETPOINT_COL.format(i), GYRO_COL.format(i)
         if spcol in df.columns and gycol in df.columns:
@@ -1924,6 +2001,7 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
         "synthesis": _synthesis(results, noise, config, throttle_max),
         "filter_suggestions": _filter_suggestions(throttle_map, config) if config else [],
         "noise_suggestions": _noise_suggestions(noise) + _filter_disable_notes(noise, config),
+        "tuning_suggestions": _tuning_suggestions(results, noise, config),
     }
 
 

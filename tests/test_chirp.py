@@ -24,7 +24,8 @@ def raw(request) -> bytes:
 def test_pipeline(raw):
     df, fs, cfg = decode(raw)
     p = analyse_log(df, fs, cfg, file="x.bbl")
-    assert {"axes", "tune_score", "noise_spectrum", "synthesis", "band_hz"} <= set(p)
+    assert {"axes", "tune_score", "noise_spectrum", "synthesis", "band_hz",
+            "tuning_suggestions"} <= set(p)
     assert p["axes"], "expected at least one analysed axis"
     html = build_report([p])
     assert "<html" in html.lower() or html.lstrip().startswith("<!")
