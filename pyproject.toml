@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "betaflight-chirp-core"
-version = "0.1.9"
+version = "0.1.10"
 description = "Betaflight closed-loop chirp / blackbox analysis core — decoder, FRF/Bode, step response, spectral, HTML report."
 readme = "README.md"
 license = { file = "LICENSE" }

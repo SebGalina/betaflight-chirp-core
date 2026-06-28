@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-06-28
+
+### Added
+- Analysis: multi-session decode — `signal.decode_all_dataframes` / `decode_sessions` decode
+  **every** flight in a concatenated `.bbl` (each with its own header config and sample rate).
+  `run()` now builds one report pass per session instead of silently keeping only the first;
+  empty/aborted sessions are skipped, explicit `session=` still selects one.
+- Analysis: `pass["tuning_suggestions"]` — reactivity-oriented headroom block (for freestyle).
+  From `mt`, step overshoot, `track_err_ratio` and the filter cut-offs it flags where the loop is
+  conservative and has room (raise P; raise a low D-term LPF cut-off when the gyro is clean above
+  it). FR/EN, per axis. The clause for D is dropped on axes that run no D (yaw).
+- Analysis: `filter_quality` carries new fields — `pres_ceil_hz` (the fixed control/noise split),
+  `noise_present` / `excess_ratio` (was attenuation applicable), alongside the existing A/P/score.
+
+### Changed
+- Analysis: **filter-quality split is now a fixed ~90 Hz control/noise edge** (`FQ_PRES_CEIL_HZ`)
+  instead of the per-log `f_split`, which swung from 40 to 210 Hz for near-identical configs and let
+  the dyn_notch's mid-band noise removal read as lost signal (the score used to peak at
+  under-filtering). Preservation is measured over [20 .. ceil], attenuation over [ceil .. Nyquist]
+  and only when there is removable noise (clean bands pass instead of being flagged under-filtered).
+  The score now peaks at balanced filtering and falls off toward both over- and under-filtering, and
+  the recommendation is directional (low preservation → reduce, low attenuation → increase) rather
+  than read off the ambiguous scalar score. `f_split`/`alpha` remain as informational fields.
+- Analysis: `pid_balance` splits the P/I/D share by **AC-RMS (mean removed)** instead of raw RMS, so
+  the I-term DC offset (attitude/trim hold) no longer masquerades as loop authority. Displayed
+  `rms_*` values are unchanged.
+
+### Fixed
+- Analysis: filter-model group-delay budget — (1) the dynamic notch no longer reports a ~6.7e8 ms
+  phantom delay (median over the band instead of a mean dominated by the group-delay singularity at
+  the notch null); (2) `dyn_notch_q` is divided by 100 to match firmware (the modelled notch was
+  100x too narrow); (3) a dynamic LPF with `dyn_min_hz = 0` is treated as OFF (firmware falls back to
+  static), so a disabled stage no longer contributes a phantom cut-off and delay.
+
 ### Added (PIDscope-parity)
 - Analysis: `analysis/filter_model.py` — analytic Betaflight filter chain (PT1/PT2/PT3 with the
   BF cutoff correction, biquad lowpass, dynamic notch) reconstructed from the parsed config.
@@ -153,7 +187,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release: package scaffold, `.bbl` decoder, `signal`/`config`,
   chirp FRF/Bode analysis, and the self-contained HTML report.
 
-[Unreleased]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.5...v0.1.6
