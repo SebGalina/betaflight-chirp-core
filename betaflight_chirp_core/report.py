@@ -13,6 +13,22 @@ from .analysis.chirp import COHERENCE_GATE, RESIDUAL_OK_DB
 
 MAX_OVERLAY_PASSES = 8
 
+# Per-axis fields the renderer needs from a NON-primary pass: the gyro raw/filtered PSD curves (for the
+# per-pass overlay on the noise panel) and the D-term SNR scalar (for the evolution tile). Everything
+# else (peaks, motor/dterm spectra, filter_quality) is primary-only and dropped to keep the HTML light.
+_NOISE_SLIM_KEYS = ("axis", "has_unfilt", "freqs", "raw_db", "filt_db", "dterm_snr_db")
+
+
+def _slim_noise(ns: dict) -> dict:
+    """Keep only the per-axis curves + D-term SNR a non-primary pass is overlaid/tiled with."""
+    axes = ns.get("axes") or {}
+    slim = {}
+    for a, d in axes.items():
+        kept = {k: d[k] for k in _NOISE_SLIM_KEYS if k in d}
+        if kept:
+            slim[a] = kept
+    return {"axes": slim} if slim else {}
+
 
 def _assemble_report(passes: list, lang: str = "fr") -> dict:
     """Trim to the last MAX_OVERLAY_PASSES, attach pass numbers + config diffs, mark primary."""
@@ -27,10 +43,16 @@ def _assemble_report(passes: list, lang: str = "fr") -> dict:
         if p.get("file"):
             p["file"] = pathlib.PurePath(p["file"]).name
         p["diff"] = config_diff(shown[k - 1]["config"], p["config"]) if k > 0 else ""
-        # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light
+        # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light.
+        # noise_spectrum is kept but SLIMMED on the others: the renderer overlays their gyro raw/filt
+        # PSD on the noise panel (per-pass pills) and plots their D-term SNR in the evolution tile, so
+        # the per-axis curves + the SNR scalar must survive — but the heavy peaks/motor/dterm/FQ blocks
+        # (only ever shown for the primary) are dropped.
         if k != primary:
-            for heavy in ("spectrogram", "throttle_map", "noise_spectrum", "step_flight"):
+            for heavy in ("spectrogram", "throttle_map", "step_flight"):
                 p.pop(heavy, None)
+            if p.get("noise_spectrum"):
+                p["noise_spectrum"] = _slim_noise(p["noise_spectrum"])
     return {"passes": shown, "primary_index": len(shown) - 1, "total_passes": len(passes),
             "lang": lang, "_glossary": GLOSSARY, "_strings": STRINGS}
 
@@ -272,24 +294,19 @@ GLOSSARY = {
               "and motor temperature.",
     },
     "filter_quality": {
-        "fr": "Qualité du filtrage — deux angles complémentaires, séparés à une fréquence FIXE (~90 Hz) entre bande "
-              "de commande et bande de bruit. "
-              "Atténuation (A) : dans quelle mesure le filtre supprime le bruit au-dessus de ~90 Hz ; sans ça les ESC "
-              "chauffent. Comptée seulement s'il y a un bruit à retirer (sinon A = pass, build propre non pénalisé). "
-              "Préservation (P) : dans quelle mesure le signal utile (< ~90 Hz, là où vit la commande) est conservé — "
-              "trop de filtre ajoute du délai et rogne la marge de phase. Le Score est leur moyenne harmonique "
-              "2AP/(A+P) : il culmine au filtrage équilibré et chute des deux côtés (sur-filtré → P baisse, "
-              "sous-filtré → A baisse). La reco vient du terme le plus faible : P bas → réduire le filtre, A bas → "
-              "l'augmenter. 1.0 = parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
-        "en": "Filter quality — two complementary angles, split at a FIXED frequency (~90 Hz) between the control "
-              "band and the noise band. "
-              "Attenuation (A): how well the filter suppresses noise above ~90 Hz — without this ESCs overheat. Only "
-              "counted when there is noise to remove (else A passes, a clean build is not penalised). "
-              "Preservation (P): how well the useful signal (< ~90 Hz, where flight control lives) is retained — "
-              "over-filtering adds delay and eats phase margin. Score is their harmonic mean 2AP/(A+P): it peaks at "
-              "balanced filtering and falls off both ways (over-filtered → P drops, under-filtered → A drops). The "
-              "recommendation comes from the weaker side: low P → reduce filtering, low A → increase it. "
-              "1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
+        "fr": "Qualité du filtrage — deux angles complémentaires. "
+              "Atténuation (A) : de la part de bruit qui émerge en pics au-dessus du plancher, combien le filtre en "
+              "supprime ; A bas = bruit qui survit (sous-filtré, risque chauffe ESC). Préservation (P) : le coût de "
+              "phase du filtre dans la bande de contrôle (retard de groupe ajouté) ; P bas = trop de filtre, délai "
+              "excessif (sur-filtré). Le Score est leur moyenne harmonique 2AP/(A+P). A ou P peut être « n/a » "
+              "quand rien n'émerge ou que le coût de phase n'est pas mesurable. "
+              "1.0 = parfait · ≥ 0.8 = bon · 0.6–0.8 = acceptable · < 0.6 = à reconfigurer.",
+        "en": "Filter quality — two complementary angles. "
+              "Attenuation (A): of the noise that emerges as peaks above the floor, how much the filter removes; "
+              "low A = noise survives (under-filtered, ESC-heat risk). Preservation (P): the filter's phase cost in "
+              "the control band (added group delay); low P = too much filter, excess delay (over-filtered). Score is "
+              "their harmonic mean 2AP/(A+P). A or P may read 'n/a' when nothing emerges or the phase cost isn't "
+              "measurable. 1.0 = perfect · ≥ 0.8 = good · 0.6–0.8 = acceptable · < 0.6 = needs reconfiguring.",
     },
     "filter_delay": {
         "fr": "Budget de délai filtre : le retard de groupe ajouté par chaque filtre configuré (gyro LPF1/LPF2, "
@@ -369,6 +386,21 @@ GLOSSARY = {
               "error (RMS of setpoint−gyro, normalised by the setpoint) says how well the drone actually FOLLOWS "
               "commands: low = tight tracking. A confirmation indicator, not a substitute for stick feel.",
     },
+    "dterm_snr": {
+        "fr": "SNR D-term : rapport (dB) entre la puissance du signal D *utile* (réaction aux mouvements réels, "
+              "< 100 Hz) et celle du bruit que la dérivation amplifie (> 100 Hz). Mesuré sur le gyro *non filtré* "
+              "(gyroUnfilt) repondéré par f² (la dérivation multiplie l'amplitude par 2πf) : c'est donc le bruit "
+              "que le filtre D *devrait* couper, pas ce qui reste après. Plus c'est haut, moins le chemin D est "
+              "noyé dans le bruit → marge pour remonter ou désactiver le dterm_lpf2. Valeur pré-filtre, surtout "
+              "comparée entre passes : reflète le bruit mécanique inhérent (moteurs/châssis), peu sensible au "
+              "réglage de filtre courant.",
+        "en": "D-term SNR: ratio (dB) of the *useful* D signal power (reaction to real motion, < 100 Hz) to the "
+              "noise the derivative amplifies (> 100 Hz). Measured on the *unfiltered* gyro (gyroUnfilt) weighted "
+              "by f² (differentiation multiplies amplitude by 2πf): it is the noise the D filter *should* cut, not "
+              "what survives it. Higher = the D path is less noise-dominated → headroom to raise or disable "
+              "dterm_lpf2. A pre-filter figure, most useful compared across passes: it reflects the inherent "
+              "mechanical noise (motors/frame), largely insensitive to the current filter settings.",
+    },
     "propwash": {
         "fr": "Propwash : les oscillations/secousses quand le drone retombe dans ses propres turbulences "
               "(descentes rapides, sorties de virage). Souvent lié à un D mou ou trop filtré, ou à une "
@@ -399,7 +431,9 @@ STRINGS = {
         "synth_h": "Lecture d'ensemble", "synth_intro": "D'après la dernière passe",
         "synth_evo": "Évolution depuis la passe 1",
         "score_h": "Note de tune", "score_vs": "vs passe précédente", "score_all": "Toutes les passes :",
-        "sc_rise": "montée", "sc_margin": "marge", "sc_noise": "bruit", "sc_track": "erreur",
+        "score_click": "(clic = détailler cette passe)",
+        "sc_rise": "montée", "sc_margin": "marge", "sc_noise": "bruit",
+        "sc_track": "erreur",
         "score_cap": "Note composite 0–100 (moyenne des axes) : overshoot, montée, marge garantie, Ms et marge "
                      "au bruit, chacun ramené sur 0–100 par une courbe physique puis moyenné (montée et overshoot "
                      "pèsent le plus). Sert à dire si cette config est meilleure ou pire que la précédente — le "
@@ -436,17 +470,26 @@ STRINGS = {
                      "C'est le chemin qui atteint les ESC : un pic en haute fréquence = oscillation qui sature et "
                      "chauffe les moteurs, même si le gyro filtré paraît propre.",
         "leg_dterm_sig": "D-term", "leg_motor_out": "sortie moteur",
+        "snr_lbl": "SNR D-term :",
+        "snr_hint": "(pré-filtre, split 100 Hz — plus haut = plus de marge pour remonter/désactiver dterm_lpf2)",
+        "snr_tile": "SNR D",
         "ff_lbl": "FF", "ff_off": "FF désactivé",
         "ms_thr_t": "Ms / gaz", "mt_thr_t": "Mt / gaz",
         "fq_h": "Qualité du filtrage",
         "fq_atten": "Atténuation", "fq_pres": "Préservation", "fq_score": "Score global", "fq_mean": "moy.",
-        "fq_cap": "Atténuation = suppression bruit HF · Préservation = signal utile conservé · "
-                  "Score = moyenne harmonique (pénalise le maillon faible) · vert ≥ 0.8 · ambre 0.6–0.8 · rouge < 0.6",
-        "fq_rec_decrease_strong": "Réduire D-LPF (sur-filtré, perte de signal et délai excessif)",
-        "fq_rec_decrease_slight": "Réduire légèrement D-LPF",
+        "fq_cap": "Atténuation = bruit émergent supprimé · Préservation = coût de phase faible (peu de retard) · "
+                  "Score = moyenne harmonique (pénalise le maillon faible) · vert ≥ 0.8 · ambre 0.6–0.8 · rouge < 0.6 · "
+                  "▲ renforcer · ▼ alléger · ● équilibré",
+        "fq_lag": "retard de phase",
+        "fq_band_ctrl": "bande contrôle ≤",
+        "fq_band_corner": "corner LPF",
+        "fq_resid_warn": "pic résiduel au-dessus du plancher :",
+        "fq_resid_ok": "aucun pic résiduel au-dessus du plancher",
+        "fq_rec_decrease_strong": "Sur-filtré — alléger le filtrage (monter les cutoffs LPF) pour réduire le retard de phase",
+        "fq_rec_decrease_slight": "Légèrement sur-filtré — alléger un peu le filtrage",
         "fq_rec_sweet_spot": "Filtrage équilibré",
-        "fq_rec_increase_slight": "Augmenter légèrement D-LPF",
-        "fq_rec_increase_strong": "Augmenter D-LPF (bruit HF excessif, risque de chauffe moteur)",
+        "fq_rec_increase_slight": "Légèrement sous-filtré — renforcer un peu le filtrage (bruit HF résiduel)",
+        "fq_rec_increase_strong": "Sous-filtré — renforcer le filtrage (bruit HF résiduel, risque de chauffe moteur)",
         "fq_rec_insufficient_data": "Données insuffisantes (émergence de bruit non détectée)",
         "leg_pred": "prédit (config)",
         "fdl_h": "Budget de délai filtre",
@@ -466,6 +509,8 @@ STRINGS = {
                      "tune quand il est propre.",
         "stepf_small": "petit step", "stepf_large": "gros step",
         "stepf_none": "indisponible (pas assez de mouvements stick francs hors chirp)",
+        "fq_rec_loosen_candidate": "Propre & faible retard — marge pour alléger encore le filtrage",
+        "fq_rec_na_motion_dominated": "n/a — spectre dominé par le mouvement, filtrage HF non mesurable",
         "step2_h": "PID",
         "sanity_h": "Contrôle des mesures — balayage du chirp",
         "spectro_cap": "{sg} — gyro {ax} pendant le sweep. La diagonale qui monte = le chirp ; les bandes "
@@ -487,7 +532,7 @@ STRINGS = {
                    "seul). Un trou dans la ligne = indicateur non mesurable sur cette passe. La vignette "
                    "« marge · f(Ms) » est la seule à deux courbes : marge garantie à gauche en ° (trait plein), "
                    "fréquence f(Ms) à droite en Hz (tireté). Sur le Ms, la bande verte (1,3–2) est la zone saine "
-                   "visée, le rouge (>2) la zone nerveuse peu robuste.",
+                   "visée, le rouge (>2) la zone nerveuse peu robuste. ★ = la meilleure passe pour cet indicateur.",
         "cmp_h": "Comparaison des réglages",
         "cmp_none": "Réglages PID + filtres identiques sur toutes les passes — les écarts de courbes "
                     "viennent du vol (batterie, throttle, bruit), pas du tune.",
@@ -516,7 +561,9 @@ STRINGS = {
         "synth_h": "Overview", "synth_intro": "Based on the latest pass",
         "synth_evo": "Change since pass 1",
         "score_h": "Tune score", "score_vs": "vs previous pass", "score_all": "All passes:",
-        "sc_rise": "rise", "sc_margin": "margin", "sc_noise": "noise", "sc_track": "error",
+        "score_click": "(click to detail that pass)",
+        "sc_rise": "rise", "sc_margin": "margin", "sc_noise": "noise",
+        "sc_track": "error",
         "score_cap": "Composite 0–100 score (mean of the axes): overshoot, rise, guaranteed margin, Ms and noise "
                      "margin, each mapped to 0–100 by a physical curve then averaged (rise and overshoot weigh "
                      "most). Tells whether this config is better or worse than the previous one — the delta "
@@ -553,17 +600,26 @@ STRINGS = {
                      "This is the path that reaches the ESCs: a high-frequency peak = an oscillation that "
                      "saturates and heats the motors, even when the filtered gyro looks clean.",
         "leg_dterm_sig": "D-term", "leg_motor_out": "motor output",
+        "snr_lbl": "D-term SNR:",
+        "snr_hint": "(pre-filter, 100 Hz split — higher = more headroom to raise/disable dterm_lpf2)",
+        "snr_tile": "D SNR",
         "ff_lbl": "FF", "ff_off": "FF off",
         "ms_thr_t": "Ms / throttle", "mt_thr_t": "Mt / throttle",
         "fq_h": "Filter Quality",
         "fq_atten": "Attenuation", "fq_pres": "Preservation", "fq_score": "Global score", "fq_mean": "mean",
-        "fq_cap": "Attenuation = HF noise suppression · Preservation = useful signal retained · "
-                  "Score = harmonic mean (penalises weakest link) · green ≥ 0.8 · amber 0.6–0.8 · red < 0.6",
-        "fq_rec_decrease_strong": "Reduce D-LPF cutoff (over-filtered — signal loss and excess delay)",
-        "fq_rec_decrease_slight": "Slightly reduce D-LPF cutoff",
+        "fq_cap": "Attenuation = emergent noise removed · Preservation = low phase cost (little delay) · "
+                  "Score = harmonic mean (penalises weakest link) · green ≥ 0.8 · amber 0.6–0.8 · red < 0.6 · "
+                  "▲ tighten · ▼ loosen · ● balanced",
+        "fq_lag": "phase lag",
+        "fq_band_ctrl": "control band ≤",
+        "fq_band_corner": "LPF corner",
+        "fq_resid_warn": "residual peak above the floor:",
+        "fq_resid_ok": "no residual peak above the floor",
+        "fq_rec_decrease_strong": "Over-filtered — loosen filtering (raise LPF cutoffs) to cut excess phase delay",
+        "fq_rec_decrease_slight": "Slightly over-filtered — loosen filtering a little",
         "fq_rec_sweet_spot": "Filtering well balanced",
-        "fq_rec_increase_slight": "Slightly increase D-LPF cutoff",
-        "fq_rec_increase_strong": "Increase D-LPF cutoff (excessive HF noise — risk of motor heat)",
+        "fq_rec_increase_slight": "Slightly under-filtered — tighten filtering a little (some HF noise survives)",
+        "fq_rec_increase_strong": "Under-filtered — tighten filtering (HF noise survives — risk of motor heat)",
         "fq_rec_insufficient_data": "Insufficient data (no noise emergence detected)",
         "leg_pred": "predicted (config)",
         "fdl_h": "Filter delay budget",
@@ -583,6 +639,8 @@ STRINGS = {
                      "score when it is clean.",
         "stepf_small": "small step", "stepf_large": "large step",
         "stepf_none": "unavailable (not enough sharp stick moves outside the chirp)",
+        "fq_rec_loosen_candidate": "Clean & low-lag — room to loosen filtering further",
+        "fq_rec_na_motion_dominated": "n/a — spectrum dominated by motion, HF filtering not measurable",
         "step2_h": "PID",
         "sanity_h": "Measurement check — chirp sweep",
         "spectro_cap": "{sg} — {ax} gyro during the sweep. The rising diagonal = the chirp; horizontal "
@@ -604,7 +662,7 @@ STRINGS = {
                    "in the line = indicator not measurable on that pass. The 'margin · f(Ms)' tile is the only "
                    "two-curve one: guaranteed margin on the left in ° (solid), f(Ms) frequency on the right in "
                    "Hz (dashed). On Ms, the green band (1.3–2) is the healthy target zone, red (>2) the nervous, "
-                   "low-robustness zone.",
+                   "low-robustness zone. ★ = the best pass for that indicator.",
         "cmp_h": "Settings comparison",
         "cmp_none": "Identical PID + filter settings across all passes — curve differences come from the "
                     "flight (battery, throttle, noise), not the tune.",

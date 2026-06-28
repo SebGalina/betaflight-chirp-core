@@ -670,17 +670,6 @@ FQ_FMIN_FIT = 40.0       # Hz, fit/detection floor — above the low-freq motion
                          # knee a single power law cannot model (else the steep motion
                          # content drags the fit down and the whole low band "emerges")
 FQ_FMIN_PRES = 20.0      # Hz, lower bound of the preservation band (skip the DC pedestal)
-FQ_PRES_CEIL_HZ = 90.0   # Hz, fixed control/noise split: P (preservation) is judged over
-                         # [FQ_FMIN_PRES .. this], A (attenuation) over [this .. Nyquist].
-                         # The useful flight-control signal lives below ~90 Hz; above it the
-                         # band is motor harmonics + broadband noise. A FIXED edge (not the
-                         # old, unstable per-log f_split) keeps the score comparable across
-                         # logs and makes it peak at balanced filtering, fall off toward both
-                         # over- (P drops) and under-filtering (A drops).
-FQ_NOISE_PRESENT_RATIO = 1.4  # raw/background energy above the ceiling must exceed this for
-                              # attenuation to be *applicable*; below it the band is already
-                              # at its natural floor (clean build), nothing to remove, so A is
-                              # not held against the tune (A treated as a pass).
 FQ_SIGMA = 2.0           # clip raw points emerging > this many sigma above the fit
 FQ_RATIO_THRESH = 1.5    # raw/fit emergence ratio that marks the signal "rising"
 FQ_CONSEC = 10           # consecutive points above the ratio to call it f_split
@@ -695,6 +684,20 @@ FQ_K_HF = 5.0            # emergence must also sit > this · HF floor (not just 
 FQ_KNEE_GRID = 25        # candidate breakpoints for the two-slope (broken power-law) fit
 FQ_SLOPE_TOL = 0.1       # both segment slopes must be ≤ this (a PSD background falls/flat,
                          # never rises with frequency) — rejects degenerate fits
+# Corner-anchored band split (Phase 1) + emergent-excess attenuation (Phase 2) +
+# phase-cost preservation (Phase 3) + regime gating (Phase 4).
+FQ_F_CTRL_MAX = 90.0     # Hz, hard ceiling of the "control" (preservation) band — the useful
+                         # rate-command bandwidth; never preserve above this even if the corner sits higher
+FQ_COH_GATE = 0.9        # coherence floor for the filter FRF (filt is a deterministic function of
+                         # raw, so coherence should be ~1; below this the bin is non-stationary noise)
+FQ_PHASE_GOOD_MS = 0.5   # group-delay added in-band at/below which preservation = 1 (cheap filter)
+FQ_PHASE_BAD_MS = 2.5    # group-delay at/above which preservation = 0 (filter lag dominates feel)
+FQ_ALPHA_STEEP = 2.0     # alpha_hf at/above this = spectrum dominated by the motion tail (label only;
+                         # A is keyed on floor-referenced peaks, not on this slope)
+FQ_FLOOR_FMIN = 70.0     # Hz, lower bound of the broadband-floor band for the attenuation measure
+                         # (matches the noise panel's floor/peak detection)
+FQ_A_GOOD = 0.70         # attenuation at/above this = emergent noise well removed (not under-filtered)
+FQ_P_GOOD = 0.70         # preservation at/above this = phase cost acceptable (not over-filtered)
 
 
 def _broken_powerlaw_fit(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
@@ -730,47 +733,197 @@ def _bp_model(x: np.ndarray, b: float, s1: float, s2: float, xb: float) -> np.nd
     return b + s1 * x + (s2 - s1) * np.maximum(x - xb, 0.0)
 
 
-FQ_GOOD = 0.70           # A or P at/above this = that side is healthy
-FQ_DEFICIT_STRONG = 0.45  # a side this far below 1.0 = a strong push in its direction
-
-
-def _fq_reco(attenuation: float, preservation: float) -> str:
-    """Recommendation code from the two components, not the combined score.
-
-    The score alone can't say which way to move — a low score can mean over- OR
-    under-filtering. Direction comes from *which* component is deficient:
-      low preservation (signal cut)      -> decrease filtering
-      low attenuation  (noise survives)  -> increase filtering
-    When both are healthy it's the sweet spot. Severity scales with the larger
-    deficit. FR/EN text for each code lives in the report strings.
-    """
-    def_over = 1.0 - preservation   # how much useful signal the filter is eating
-    def_lax = 1.0 - attenuation     # how much noise the filter leaves behind
-    if attenuation >= FQ_GOOD and preservation >= FQ_GOOD:
+def _fq_reco(score: float) -> str:
+    """Map a filter-quality score [0..1] to a recommendation code (FR/EN in strings)."""
+    if score >= 0.90:
+        return "decrease_strong"
+    if score >= 0.70:
+        return "decrease_slight"
+    if score >= 0.50:
         return "sweet_spot"
-    if def_over >= def_lax:         # preservation is the weaker side -> over-filtered
-        return "decrease_strong" if def_over >= FQ_DEFICIT_STRONG else "decrease_slight"
-    return "increase_strong" if def_lax >= FQ_DEFICIT_STRONG else "increase_slight"
+    if score >= 0.30:
+        return "increase_slight"
+    return "increase_strong"
+
+
+def _fq_reco_pres(p: float) -> str:
+    """Reco when only preservation P is measurable (no emergent noise to attenuate).
+
+    High P = the filter spares the useful band and there is nothing left to remove → room to
+    loosen. Low P = the filter is eating the control band for no benefit → over-filtered."""
+    if p >= 0.70:
+        return "loosen_candidate"
+    if p >= 0.50:
+        return "sweet_spot"
+    return "decrease_strong"
+
+
+def _fq_reco_atten(a: float) -> str:
+    """Reco when only attenuation A is measurable (emergence present, no phase data).
+
+    High A = the filter is killing the excess → fine. Low A = noise still emerges → tighten."""
+    if a >= 0.50:
+        return "sweet_spot"
+    if a >= 0.30:
+        return "increase_slight"
+    return "increase_strong"
+
+
+def _fq_verdict(A: float, P: float) -> str:
+    """Recommendation from attenuation A and preservation P *directly* — not from the harmonic
+    score, which can't tell an under-filtered low score from an over-filtered one (opposite fixes).
+
+    Under-filtered = emergent noise survives (low A) → tighten filtering. Over-filtered = excess
+    phase delay (low P) → loosen filtering. When both are healthy, a very high P means there is
+    spare phase margin to loosen further; otherwise it is the sweet spot."""
+    if A < 0.50:
+        return "increase_strong"          # noise clearly survives → more filtering
+    if A < FQ_A_GOOD:
+        return "increase_slight"
+    if P < 0.50:
+        return "decrease_strong"          # heavy phase lag → loosen hard
+    if P < FQ_P_GOOD:
+        return "decrease_slight"
+    if P >= 0.90:
+        return "loosen_candidate"         # both healthy, lots of phase margin
+    return "sweet_spot"
+
+
+def _fq_compose(A: float | None, P: float | None, *, alpha_steep: bool = False):
+    """Recompose the filter-quality score + verdict from attenuation A and preservation P
+    (Phase 5). Shared by ``_filter_quality`` (per axis) and ``_filter_quality_block`` (mean) so
+    the two never diverge — the bug being that ``_fq_reco`` on a preservation-only score reads a
+    high P (great, low phase lag) as 'over-filtered'. Returns (score, recommendation, confidence,
+    reason|None)."""
+    if A is None and P is None:
+        if alpha_steep:
+            return None, "na_motion_dominated", "low", \
+                "no measurable HF noise (steep roll-off / motion-dominated spectrum)"
+        return None, "loosen_candidate", "low", "clean spectrum, no noise emergence — room to loosen"
+    if A is None:                              # only preservation measurable (nothing emerged)
+        return P, _fq_reco_pres(P), "low", "no noise emergence — verdict from preservation only"
+    if P is None:                              # only attenuation measurable (no phase data)
+        return A, _fq_reco_atten(A), "low", None
+    score = round(2.0 * A * P / (A + P), 3) if (A + P) > 0.0 else 0.0
+    return score, _fq_verdict(A, P), "high", None     # verdict from A/P directly, not the score
+
+
+# filter "order" (group-delay multiplier vs a single PT1) by Betaflight low-pass type
+_LPF_ORDER = {"PT1": 1.0, "PT2": 2.0, "PT3": 3.0, "BIQUAD": 1.41}  # BIQUAD ≈ √2/ωc at DC
+
+
+def _lpf_group_delay_ms(stages: list, f_ctrl_max: float) -> float | None:
+    """Analytic mean group delay (ms) of a cascade of low-pass stages over the control band.
+
+    A 1st-order PT1 of cutoff fc has group delay τ(f) = (1/ωc)/(1+(2πf/ωc)²), ωc=2π·fc; PTn ≈ n·that
+    (n cascaded stages add); BIQUAD ≈ √2/ωc at DC. Cascaded stages' delays add. Averaged over
+    [FQ_FMIN_PRES, f_ctrl_max]. ``stages`` = [(fc_hz, order), …]. Returns None if no stage."""
+    stages = [(fc, order) for fc, order in stages if fc and fc > 0]
+    if not stages:
+        return None
+    grid = np.linspace(FQ_FMIN_PRES, max(f_ctrl_max, FQ_FMIN_PRES + 1.0), 16)
+    w = 2.0 * np.pi * grid
+    tau = np.zeros_like(grid)
+    for fc, order in stages:
+        wc = 2.0 * np.pi * float(fc)
+        tau += order * (1.0 / wc) / (1.0 + (w / wc) ** 2)
+    return float(np.mean(tau)) * 1e3
+
+
+def _filter_corners(config: dict, fs: float) -> dict | None:
+    """Effective GYRO-side filter corner frequencies for the quiet-window noise spectrum.
+
+    The noise spectrum is gyroUnfilt vs gyroADC, so only the gyro filters shape it:
+      - gyro_lpf1 is *dynamic*. The quiet window is measured at low throttle, so the dynamic
+        cutoff sits near its LOWER bound; we use that lower bound as the effective corner. Using
+        the high bound would overstate the filtering actually applied during the measurement and
+        push the band split too high (the bug the corner-anchoring fixes).
+      - gyro_lpf2 is a static second stage.
+      - dyn_notch sweeps between min/max (carried through for context, not part of the LPF corner).
+
+    Returns {lpf1, lpf2, notch_min, notch_max, corner, group_delay_ms} (Hz/ms) or None if nothing
+    usable. ``corner`` is the lowest active low-pass cutoff; ``group_delay_ms`` is the analytic
+    in-control-band group delay of the gyro LPF cascade (deterministic, the robust preservation
+    metric — the measured FRF group delay is noisy/non-stationary, see _filter_phase_cost).
+    """
+    if not config:
+        return None
+    g1 = config.get("gyro_lpf1") or {}
+    dyn = g1.get("dyn") or []
+    lpf1 = (dyn[0] if dyn else None) or g1.get("static")     # lower dynamic bound, else static
+    g2 = config.get("gyro_lpf2") or {}
+    lpf2 = g2.get("static")
+    dn = config.get("dyn_notch") or {}
+    notch_min, notch_max = dn.get("min"), dn.get("max")
+    lpfs = [v for v in (lpf1, lpf2) if v and v > 0]
+    corner = float(min(lpfs)) if lpfs else None
+    if corner is None and notch_min is None and notch_max is None:
+        return None
+    f_ctrl_max = min(corner, FQ_F_CTRL_MAX) if corner else FQ_F_CTRL_MAX
+    stages = [(lpf1, _LPF_ORDER.get((g1.get("type") or "PT1").upper(), 1.0)),
+              (lpf2, _LPF_ORDER.get((g2.get("type") or "PT1").upper(), 1.0))]
+    group_delay_ms = _lpf_group_delay_ms(stages, f_ctrl_max)
+    return {"lpf1": lpf1, "lpf2": lpf2, "notch_min": notch_min, "notch_max": notch_max,
+            "corner": corner, "group_delay_ms": group_delay_ms}
+
+
+def _filter_phase_cost(sig_raw: np.ndarray, sig_filt: np.ndarray, fs: float, nperseg: int,
+                       f_ctrl_max: float = FQ_F_CTRL_MAX) -> dict | None:
+    """Phase cost of the gyro filter chain: group delay it adds in the control band.
+
+    The true price of filtering is not lost power, it is the group delay injected where the
+    rate loop is still acting. We measure the filter's own FRF H = gyroADC/gyroUnfilt (a
+    deterministic transfer, so coherence should be ~1 — bins below FQ_COH_GATE are dropped as
+    non-stationary, e.g. dyn_notch wandering). Returns {phase_lag_ms, mag_droop_db, coherence}
+    over [FQ_FMIN_PRES, f_ctrl_max], or None if the band is unusable.
+    """
+    if sig_raw is None or sig_filt is None:
+        return None
+    sig_raw = np.asarray(sig_raw, float)
+    sig_filt = np.asarray(sig_filt, float)
+    if sig_raw.size < nperseg or sig_filt.size < nperseg:
+        return None
+    fr, gdb, ph, coh, _ = _frf(sig_raw, sig_filt, fs, nperseg)
+    band = (fr >= FQ_FMIN_PRES) & (fr <= f_ctrl_max) & (coh > FQ_COH_GATE)
+    if int(band.sum()) < 3:
+        return None
+    # Group delay via a robust LINEAR fit of unwrapped phase vs ω over the band (slope = mean group
+    # delay), not a pointwise -dφ/dω which is dominated by phase jitter when the filter barely acts.
+    # Clamp ≥0: a causal filter cannot have negative group delay (negatives = pure measurement noise).
+    w = 2.0 * np.pi * fr
+    phr = np.unwrap(np.deg2rad(ph))
+    slope = float(np.polyfit(w[band], phr[band], 1)[0])
+    tau_ms = max(0.0, -slope) * 1e3
+    droop_i = int(np.argmin(np.abs(fr - f_ctrl_max)))
+    return {
+        "phase_lag_ms": tau_ms,
+        "mag_droop_db": float(gdb[droop_i]),
+        "coherence": float(np.mean(coh[band])),
+    }
 
 
 def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
-                    fs: float) -> dict | None:
-    """Universal filter-quality score in [0,1] from raw vs filtered gyro PSD (linear).
+                    fs: float, *, corners: dict | None = None,
+                    sig_raw: np.ndarray | None = None, sig_filt: np.ndarray | None = None,
+                    nperseg: int | None = None) -> dict | None:
+    """Filter-quality score in [0,1] from raw vs filtered gyro PSD (linear), corner-anchored.
 
-    Two reference-independent components over a FIXED control/noise split at
-    ``FQ_PRES_CEIL_HZ``:
-      P (preservation) = ∫filt/∫raw over [FQ_FMIN_PRES .. ceil] — is the control
-                         band (where flight-control signal lives) spared?
-      A (attenuation)  = 1 - ∫filt/∫raw over [ceil .. Nyquist] — is the noise
-                         above it killed? Only counted when there IS removable
-                         noise there (raw exceeds its fitted background by
-                         FQ_NOISE_PRESENT_RATIO); on a clean band A passes (=1).
-    ``score`` is their harmonic mean: it peaks at balanced filtering and falls off
-    toward over-filtering (P drops) and under-filtering (A drops). The power-law
-    fit (alpha, f_knee) and the emergence ``f_split`` are still computed but are
-    informational only — they no longer drive the split (the old per-log f_split
-    was unstable and let the dyn_notch's mid-band noise removal read as lost
-    signal). Returns None if the band integrals are not feasible.
+    Fits a (broken) power law (PSD ∝ f^-α) to the raw spectrum in log-log, iteratively
+    sigma-clipping points that emerge *above* the fit, so the fit converges on the signal's
+    natural background. ``f_split`` is the first frequency where the raw/fit ratio stays above
+    FQ_RATIO_THRESH for FQ_CONSEC consecutive points.
+
+    The two reference-independent components are:
+      A (attenuation)  — over [max(f_split, corner)..fmax], the fraction of the *emergent excess*
+                         above the background the filter removes. None when nothing emerges
+                         (clean spectrum) or the spectrum is motion-dominated (alpha_hf steep).
+      P (preservation) — the phase cost of the filter in the control band [FQ_FMIN_PRES..f_ctrl_max]:
+                         group delay added, mapped 0.5→2.5 ms onto 1→0 (needs ``sig_raw``/``sig_filt``).
+                         Falls back to a corner-bounded magnitude ratio when no time signals are given.
+
+    When a gyro ``corners`` dict is supplied the band split is anchored on the real low-pass
+    corner instead of fs/4, which is what stops P from counting the intended roll-off as lost
+    signal and A from sweeping a too-wide noise band. Returns None if the fit is not feasible.
     """
     f = np.asarray(f, float)
     raw = np.asarray(raw_lin, float)
@@ -808,11 +961,13 @@ def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
     alpha_hf = alpha_lf = 0.0
     f_knee = 0.0
     f_split: float | None = None
+    b = s1 = s2 = xb = 0.0
+    have_fit = False
     if fm.size >= 20:
+        have_fit = True
         x = np.log10(fm)
         y = np.log10(rm)
         keep = np.ones(x.shape, dtype=bool)
-        b = s1 = s2 = xb = 0.0
         s2_prev: float | None = None
         for _ in range(FQ_MAX_ITER):
             if int(keep.sum()) < 8:
@@ -853,95 +1008,153 @@ def _filter_quality(f: np.ndarray, raw_lin: np.ndarray, filt_lin: np.ndarray,
             else:
                 run = 0
 
+    fmax = float(f[-1])
+    corner = float(corners["corner"]) if (corners and corners.get("corner")) else None
+    # Control-band ceiling: never preserve above the corner, and never above the hard rate-loop
+    # bandwidth (FQ_F_CTRL_MAX). Without a corner, fall back to the hard ceiling alone.
+    f_ctrl_max = min(corner, FQ_F_CTRL_MAX) if corner else FQ_F_CTRL_MAX
+
+    # --- Band split (Phase 1). With a real corner the fallback anchors on it, not fs/4 — fs/4
+    # is what let the preservation band swallow the intended low-pass roll-off.
     fallback = False
     if f_split is None or f_split < 20.0 or f_split > fs / 3.0:
-        f_split = fs / 4.0
-        fallback = True
+        if corner is not None:
+            f_split = corner
+        else:
+            f_split = fs / 4.0
+            fallback = True
 
-    # Two reference-independent components over a FIXED control/noise split (not the
-    # old, per-log f_split, which was unstable and let the dyn_notch's mid-band noise
-    # removal masquerade as lost signal):
-    #   P (preservation) over [f_low .. ceil]:  does the filter spare the control band?
-    #   A (attenuation)  over [ceil .. fmax]:   does it kill the noise above it?
-    # The harmonic mean peaks at balanced filtering and falls off toward both
-    # over-filtering (P drops) and under-filtering (A drops). f_split / alpha are
-    # kept below as informational noise-shape fields only.
-    fmax = float(f[-1])
-    f_low = FQ_FMIN_PRES                       # exclude the DC pedestal from P
-    ceil = min(FQ_PRES_CEIL_HZ, fmax)
+    # --- Attenuation A (Phase 2): of the noise that *emerges as peaks above the broadband floor*,
+    # how much linear power the filter removes. Keyed on the SAME floor-referenced peak detection
+    # the noise panel shows (find_peaks prominence), not on the power-law fit: the fit is fragile on
+    # real broken spectra (it absorbs the noise hump as "background"), and a raw/floor integral would
+    # count the smooth motion tail as excess. Peaks exclude both — flat noise and smooth backgrounds
+    # have no prominent peaks, so A is None there ("nothing emergent to attenuate").
+    alpha_regime = "steep" if alpha_hf >= FQ_ALPHA_STEEP else "normal"
+    A: float | None = None
+    excess_present = False
+    a_band = (f >= FQ_FLOOR_FMIN) & (f <= nyq - FQ_ALIAS_GUARD_HZ) & (raw > 0)   # floor-referenced band
+    if int(a_band.sum()) >= 8:
+        fb = f[a_band]
+        rb_lin = np.asarray(raw_lin, float)[a_band]
+        flb_lin = np.asarray(filt_lin, float)[a_band]
+        floor_lin = float(np.percentile(rb_lin, NOISE_FLOOR_PCT))
+        if floor_lin > 0.0:
+            rb_db = 10.0 * np.log10(np.maximum(rb_lin / floor_lin, 1e-12))   # raw over floor (dB)
+            dfd = float(np.median(np.diff(fb))) or 1.0
+            idx, _props = sp_signal.find_peaks(rb_db, prominence=NOISE_PEAK_PROM_DB,
+                                               distance=max(1, int(15.0 / dfd)))
+            if idx.size:
+                excess_present = True
+                # emergent linear power above the floor at each peak, raw vs filtered
+                er = np.clip(rb_lin[idx] - floor_lin, 0.0, None)
+                ef = np.clip(flb_lin[idx] - floor_lin, 0.0, None)
+                denom = float(er.sum())
+                if denom > 0.0:
+                    A = min(max(1.0 - float(ef.sum()) / denom, 0.0), 1.0)
 
-    def _ratio(lo, hi):
-        b = (f >= lo) & (f <= hi)
-        if int(b.sum()) < 3:
-            return None
-        pr = float(trapezoid(raw[b], f[b]))
-        if pr <= 0.0:
-            return None
-        return float(trapezoid(filt[b], f[b])) / pr
+    # --- Preservation P (Phase 3): phase cost of the filter in the control band — the group delay
+    # it adds where the loop still acts. PRIMARY = analytic delay from the (known) gyro filter
+    # config: deterministic and identical across axes, so immune to the FRF phase noise that made
+    # the measured group delay swing wildly / go negative axis-to-axis. The measured FRF lag is
+    # kept as a guard-rail (phase_lag_frf_ms). Magnitude ratio is a last resort when neither exists.
+    phase = _filter_phase_cost(sig_raw, sig_filt, fs, nperseg, f_ctrl_max) if nperseg else None
+    analytic_ms = corners.get("group_delay_ms") if corners else None
+    P: float | None = None
+    phase_lag_ms = mag_droop_db = phase_lag_frf_ms = None
+    if phase is not None:
+        phase_lag_frf_ms = round(phase["phase_lag_ms"], 3)
+        mag_droop_db = round(phase["mag_droop_db"], 2)
+    if analytic_ms is not None:
+        phase_lag_ms = round(analytic_ms, 3)
+        pp = _ramp(analytic_ms, FQ_PHASE_GOOD_MS, FQ_PHASE_BAD_MS)
+        P = round(pp / 100.0, 3) if pp is not None else None
+    elif phase is not None:
+        phase_lag_ms = phase_lag_frf_ms
+        pp = _ramp(phase["phase_lag_ms"], FQ_PHASE_GOOD_MS, FQ_PHASE_BAD_MS)
+        P = round(pp / 100.0, 3) if pp is not None else None
+    elif not fallback:
+        # corner-bounded magnitude preservation (no phase data at all): only trustworthy once the
+        # band is anchored on a real split/corner; in fallback the band is meaningless → leave None.
+        p_hi = min(f_split, f_ctrl_max)
+        pb = (f >= FQ_FMIN_PRES) & (f <= p_hi)
+        if int(pb.sum()) >= 3:
+            pr = float(trapezoid(raw[pb], f[pb]))
+            if pr > 0.0:
+                P = min(max(float(trapezoid(filt[pb], f[pb])) / pr, 0.0), 1.0)
 
-    r_signal = _ratio(f_low, ceil)             # filt/raw in the control band
-    r_noise = _ratio(ceil, fmax)               # filt/raw in the noise band
-    if r_noise is None or r_signal is None:
-        return None
-    P = min(max(r_signal, 0.0), 1.0)           # 1 = signal untouched, 0 = signal crushed
-    A_raw = min(max(1.0 - r_noise, 0.0), 1.0)  # 1 = perfect attenuation, 0 = filter does nothing
+    # --- Score recomposition + verdict (Phase 5).
+    if A is not None:
+        A = round(A, 3)
+    score, recommendation, confidence, reason = _fq_compose(
+        A, P, alpha_steep=(alpha_regime == "steep"))
 
-    # Is there removable noise above the ceiling, or is the band already at its natural
-    # floor? Compare raw energy to the fitted power-law background. On a clean build with
-    # nothing to remove, A_raw would be ~0 (filt ≈ raw) — that must NOT read as "too lax".
-    fit_ok = fm.size >= 20
-    excess_ratio = None
-    noise_present = True
-    if fit_ok:
-        nb = (f >= ceil) & (f <= fmax)
-        if nb.any():
-            bg = 10.0 ** _bp_model(np.log10(f[nb]), b, s1, s2, xb)
-            p_raw = float(trapezoid(raw[nb], f[nb]))
-            p_bg = float(trapezoid(bg, f[nb]))
-            excess_ratio = (p_raw / p_bg) if p_bg > 0.0 else None
-            noise_present = excess_ratio is None or excess_ratio >= FQ_NOISE_PRESENT_RATIO
-    A = A_raw if noise_present else 1.0        # clean band: nothing to attenuate, A passes
-
-    score = (2.0 * A * P / (A + P)) if (A + P) > 0.0 else 0.0
     out = {
-        "score": round(score, 3),
-        "score_attenuation": round(A, 3),
-        "score_preservation": round(P, 3),
-        "pres_ceil_hz": round(ceil, 1),         # the fixed control/noise split used
-        "noise_present": noise_present,         # was attenuation applicable (noise above ceil)?
-        "excess_ratio": round(excess_ratio, 2) if excess_ratio is not None else None,
-        "f_split_hz": round(f_split, 1),        # informational: where noise emerges
-        "alpha": round(alpha_hf, 2),            # HF (noise-plateau) slope
+        "score": score,
+        "score_attenuation": A,
+        "score_preservation": P,
+        "f_split_hz": round(f_split, 1),
+        "f_ctrl_max_hz": round(f_ctrl_max, 1),
+        "corner_hz": round(corner, 1) if corner is not None else None,
+        "alpha": round(alpha_hf, 2),            # HF (noise-plateau) slope — the meaningful one
         "alpha_lf": round(alpha_lf, 2),         # low-freq (motion) slope
+        "alpha_regime": alpha_regime,
         "f_knee_hz": round(f_knee, 1),          # breakpoint between the two slopes
-        "fallback": fallback,                   # f_split detection fell back (no emergence)
+        "fallback": fallback,
+        "excess_present": excess_present,
         "masked_bins_count": masked_bins_count,
-        "confidence": "high",
-        "recommendation": _fq_reco(A, P),
+        "phase_lag_ms": phase_lag_ms,            # analytic (config) when available, else FRF
+        "phase_lag_frf_ms": phase_lag_frf_ms,    # measured FRF group delay (guard-rail / reference)
+        "mag_droop_db": mag_droop_db,
+        "confidence": confidence,
+        "recommendation": recommendation,
     }
-    if not noise_present:
-        out["reason"] = "clean_band: no removable noise above the ceiling"
+    if reason is not None:
+        out["reason"] = reason
     return out
 
 
 def _filter_quality_block(noise: dict) -> dict:
-    """Collect per-axis filter_quality from the noise spectrum + a mean-of-axes summary."""
+    """Collect per-axis filter_quality from the noise spectrum + a mean-of-axes summary.
+
+    Per-axis scores can be None (clean spectrum, motion-dominated, or only one of A/P
+    measurable), so every mean filters the Nones first and is itself None when no axis
+    has that quantity. The verdict follows the mean score when it is defined."""
     axes = (noise or {}).get("axes") or {}
     per = {a: d["filter_quality"] for a, d in axes.items() if d.get("filter_quality")}
     if not per:
         return {}
-    mean_score = round(float(np.mean([v["score"] for v in per.values()])), 3)
-    mean_a = float(np.mean([v["score_attenuation"] for v in per.values()]))
-    mean_p = float(np.mean([v["score_preservation"] for v in per.values()]))
+
+    def _mean(key, agg=np.mean, nd=3):
+        vals = [v[key] for v in per.values() if v.get(key) is not None]
+        return round(float(agg(vals)), nd) if vals else None
+
+    mean_A = _mean("score_attenuation")              # real per-axis variation → mean
+    # P / phase lag come from one filter shared by all axes, so the per-axis spread is measurement
+    # noise — aggregate with the MEDIAN (one bad axis can't drag the verdict, the report5 bug).
+    mean_P = _mean("score_preservation", np.median)
+    # Recompose the mean verdict from mean A/P with the SAME Phase-5 logic as per axis, so the
+    # block can't disagree with its own rows (a preservation-only mean must not read as "tighten").
+    all_steep = mean_A is None and all(v.get("alpha_regime") == "steep" for v in per.values())
+    score, recommendation, confidence, reason = _fq_compose(mean_A, mean_P, alpha_steep=all_steep)
     mean = {
-        "score": mean_score,
-        "score_attenuation": round(mean_a, 3),
-        "score_preservation": round(mean_p, 3),
-        "f_split_hz": round(float(np.median([v["f_split_hz"] for v in per.values()])), 1),
-        "confidence": "high",
-        # Direction from the mean components, like each axis — over- vs under-filtered.
-        "recommendation": _fq_reco(mean_a, mean_p),
+        "score": score,
+        "score_attenuation": mean_A,
+        "score_preservation": mean_P,
+        "f_split_hz": _mean("f_split_hz", np.median, 1),
+        "phase_lag_ms": _mean("phase_lag_ms", np.median),
+        "phase_lag_frf_ms": _mean("phase_lag_frf_ms", np.median),
+        "confidence": confidence,
+        "recommendation": recommendation,
     }
+    if reason is not None:
+        mean["reason"] = reason
+    # worst surviving residual peak across axes (the case A can't see — flag it explicitly)
+    survivors = [(v["worst_resid_db"], v.get("worst_resid_hz"), a)
+                 for a, v in per.items() if v.get("worst_resid_db") is not None]
+    if survivors:
+        rd, hz, ax = max(survivors)
+        mean["worst_resid_db"], mean["worst_resid_hz"], mean["worst_resid_axis"] = rd, hz, ax
     return {"axes": per, "mean": mean}
 
 
@@ -962,7 +1175,8 @@ def _filter_model_block(config: dict, fs: float, fmin: float, fmax: float) -> di
 
 
 def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.ndarray,
-                    fmin: float = 30.0, fmax: float | None = None) -> dict:
+                    fmin: float = 30.0, fmax: float | None = None,
+                    corners: dict | None = None) -> dict:
     """Gyro PSD (dB) over a chirp-free window: raw (gyroUnfilt) vs filtered (gyroADC).
 
     During the chirp the gyro is full of excitation across the whole band, which masks the real
@@ -992,9 +1206,17 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
     has_unfilt = ucol in df.columns
     f, raw_lin = psd(ucol if has_unfilt else gcol)
     _, filt_lin = psd(gcol)
-    # Universal filter-quality score needs the full linear PSD down to ~5 Hz for the
-    # power-law fit, so compute it before the dB conversion and the fmin crop below.
-    fq = _filter_quality(f, raw_lin, filt_lin, fs) if has_unfilt else None
+    # Filter-quality score needs the full linear PSD down to ~5 Hz for the power-law fit, so
+    # compute it before the dB conversion and the fmin crop below. The phase-cost preservation
+    # (Phase 3) also needs the raw time-domain gyroUnfilt/gyroADC over the quiet window.
+    fq = None
+    if has_unfilt:
+        sig_raw = sp_signal.detrend(df.loc[m, ucol].to_numpy(float))
+        sig_filt = sp_signal.detrend(df.loc[m, gcol].to_numpy(float))
+        fq = _filter_quality(f, raw_lin, filt_lin, fs, corners=corners,
+                             sig_raw=sig_raw, sig_filt=sig_filt, nperseg=nperseg)
+    # D-term SNR from the pre-filter (gyroUnfilt) spectrum — full band, before the fmin crop below.
+    snr_d = _dterm_snr_db(f, raw_lin, fmax) if has_unfilt else None
     raw = 10.0 * np.log10(raw_lin + 1e-10)
     filt = 10.0 * np.log10(filt_lin + 1e-10)
     sel = (f >= fmin) & (f <= fmax)
@@ -1021,6 +1243,14 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
         peaks.sort(key=lambda p: p["above_floor_db"], reverse=True)
         peaks = peaks[:6]
 
+    # Worst surviving peak (highest filtered residual over the floor). A saturates near 1 when the
+    # filter removes most of the *energy*, so it can miss a single peak that creeps back above the
+    # floor (e.g. a too-low dyn_notch Q). Surface that residual explicitly alongside filter_quality.
+    if fq is not None and peaks:
+        wp = max(peaks, key=lambda p: p["resid_db"])
+        fq["worst_resid_db"] = wp["resid_db"]
+        fq["worst_resid_hz"] = wp["freq_hz"]
+
     step = max(1, len(f) // 400)
     return {
         "axis": AXES[axis_idx], "has_unfilt": bool(has_unfilt),
@@ -1029,6 +1259,7 @@ def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.n
         "filt_db": [round(float(v), 1) for v in filt[::step]],
         "peaks": peaks,
         **({"filter_quality": fq} if fq else {}),
+        **({"dterm_snr_db": snr_d} if snr_d is not None else {}),
     }
 
 
@@ -1104,6 +1335,34 @@ def _dterm_motor_spectrum(df: pd.DataFrame, fs: float, quiet_for, quiet_primary:
             out["motor"] = mt
 
     return out if out["axes"] or out.get("motor") else {}
+
+
+DTERM_SNR_SPLIT_HZ = 100.0   # boundary: useful D (reaction to real motion) below, derivation noise above
+DTERM_SNR_FMIN_HZ = 10.0     # ignore sub-10 Hz drift / detrend residual in the signal band
+
+
+def _dterm_snr_db(f: np.ndarray, raw_lin: np.ndarray, fmax: float,
+                  split: float = DTERM_SNR_SPLIT_HZ, fmin: float = DTERM_SNR_FMIN_HZ) -> float | None:
+    """D-term signal/noise ratio (dB) from the RAW (pre-filter) gyro spectrum.
+
+    The D path differentiates the gyro, so its power spectrum is the gyro PSD weighted by (2*pi*f)^2.
+    Split that derivative power at `split` Hz: below = the useful D reaction to real stick / airframe
+    motion, above = the broadband noise the derivative amplifies (what the D-term LPFs exist to kill).
+    A high ratio means little of the D path is noise -> headroom to raise or disable dterm_lpf2.
+    The (2*pi)^2 constant cancels in the ratio, so we weight by f^2 directly. Computed from gyroUnfilt
+    (pre-filter), so it reflects the noise the LPF *would* see, not what survives the current filter.
+    """
+    f = np.asarray(f, float)
+    w = (f ** 2) * np.asarray(raw_lin, float)
+    lo = (f >= fmin) & (f < split)
+    hi = (f >= split) & (f <= fmax)
+    if int(lo.sum()) < 3 or int(hi.sum()) < 3:
+        return None
+    s = float(trapezoid(w[lo], f[lo]))
+    n = float(trapezoid(w[hi], f[hi]))
+    if s <= 0.0 or n <= 0.0:
+        return None
+    return round(10.0 * np.log10(s / n), 1)
 
 
 def _worst_residual_db(noise: dict) -> float | None:
@@ -1448,7 +1707,7 @@ def _frf_pack(x, y, sp_vals, fs, nperseg, a_fmin, a_fmax):
 
 
 def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT_FMAX,
-            nperseg=None, motor_poles=None) -> dict:
+            nperseg=None, motor_poles=None, config=None) -> dict:
     nyq = fs / 2.0
     fmax = min(fmax, nyq * 0.98)
     if nperseg is None:
@@ -1639,10 +1898,11 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
             return q & (thr > idle) if thr is not None else q
 
         noise_axes = {}
+        corners = _filter_corners(config, fs)
         for i, axis in enumerate(AXES):
             if GYRO_COL.format(i) not in df.columns:
                 continue
-            n = _noise_spectrum(df, fs, i, quiet_for(i), fmin=30.0, fmax=fmax)
+            n = _noise_spectrum(df, fs, i, quiet_for(i), fmin=30.0, fmax=fmax, corners=corners)
             if n:
                 noise_axes[axis] = n
 
@@ -1920,7 +2180,7 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
     axes_filter = [axis] if axis else None
     results, throttle_map, noise, spectro = analyse(
         df, fs, input_col, axes_filter, fmin=fmin, fmax=fmax, nperseg=nperseg,
-        motor_poles=config.get("motor_poles"))
+        motor_poles=config.get("motor_poles"), config=config)
     nyq = fs / 2.0
     throttle_max = None
     thr, idle, thr_src = _throttle_series(df)
