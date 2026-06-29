@@ -18,7 +18,7 @@ import pandas as pd
 from scipy import signal as sp_signal
 from scipy.integrate import trapezoid
 
-from ..signal import AXES, THROTTLE_COL, TIME_COL
+from ..signal import AXES, THROTTLE_COL, TIME_COL, active_mask as _active_mask
 
 GYRO_COL = "gyroADC[{}]"
 
@@ -496,8 +496,13 @@ def _thr_percent(thr: np.ndarray, src: str) -> np.ndarray:
 
 
 def _throttle_map(df: pd.DataFrame, fs: float, axis_idx: int, fmin: float, fmax: float,
-                  nbins: int = THROTTLE_BINS) -> dict:
-    """PSD of gyro per throttle slice -> heatmap of how resonances migrate with throttle."""
+                  nbins: int = THROTTLE_BINS, poles=None) -> dict:
+    """PSD of gyro per throttle slice -> heatmap of how resonances migrate with throttle.
+
+    When `poles` and eRPM telemetry are present, also returns `motor_orders`: the mean motor
+    rotation fundamental (Hz) per throttle bin, so the renderer can draw the 1x/2x/3x order
+    lines that climb with throttle (ground truth that a peak is motor-borne, not a frame resonance).
+    """
     gcol = GYRO_COL.format(axis_idx)
     thr, idle, src = _throttle_series(df)
     if gcol not in df.columns or thr is None:
@@ -541,13 +546,28 @@ def _throttle_map(df: pd.DataFrame, fs: float, axis_idx: int, fmin: float, fmax:
     levels = [row if row is not None else [None] * width for row in levels]
     # downsample frequency axis to keep the payload light
     step = max(1, width // 200)
-    return {
+    out = {
         "axis": AXES[axis_idx],
         "source": src,
         "throttle_bins": centers,
         "freqs": [round(float(x), 1) for x in freqs_ref[::step]],
         "levels_db": [row[::step] for row in levels],
     }
+    # per-bin motor fundamental (Hz) from eRPM -> order lines that climb with throttle
+    ecols = [f"eRPM[{i}]" for i in range(4) if f"eRPM[{i}]" in df.columns]
+    if poles and ecols:
+        orders = []
+        for m in masks:
+            if m is None:
+                orders.append(None)
+                continue
+            e = df.loc[m, ecols].to_numpy(float).ravel()
+            e = e[e > 0]
+            orders.append(round(float(np.mean(e)) * 100.0 / (poles / 2.0) / 60.0, 1)
+                          if e.size >= 64 else None)
+        if any(o is not None for o in orders):
+            out["motor_orders"] = orders
+    return out
 
 
 def _spectrogram(sig: np.ndarray, fs: float, fmin: float = 5.0, fmax: float | None = None,
@@ -1138,6 +1158,22 @@ def _filter_quality_block(noise: dict) -> dict:
     return {"axes": per, "mean": mean}
 
 
+def _filter_model_block(config: dict, fs: float, fmin: float, fmax: float) -> dict:
+    """Analytic predicted filter response + group-delay budget from the config.
+
+    Forward model (config -> expected): a predicted magnitude curve to overlay on
+    the measured noise PSD and a per-stage delay budget. Empty when no config.
+    """
+    if not config:
+        return {}
+    from .filter_model import build_filter_model
+    try:
+        return build_filter_model(config, fs, fmin=fmin, fmax=fmax)
+    except Exception:
+        logger.exception("filter_model failed")
+        return {}
+
+
 def _noise_spectrum(df: pd.DataFrame, fs: float, axis_idx: int, quiet_mask: np.ndarray,
                     fmin: float = 30.0, fmax: float | None = None,
                     corners: dict | None = None) -> dict:
@@ -1394,6 +1430,77 @@ def _filter_disable_notes(noise: dict, config: dict) -> list[dict]:
     return out
 
 
+# --- reactivity (freestyle) tuning headroom -------------------------------------
+# Thresholds for "the loop is conservative — there is room to be snappier". An LLM
+# chasing freestyle reactivity reads these instead of re-deriving them from the raw
+# metrics. All deliberately cautious: they flag *available* headroom, not a mandate.
+_MT_OVERDAMPED = 1.05      # closed-loop peak below this = damped, room to raise P
+_MT_SNAPPY = 1.15          # freestyle target band upper edge (Mt ~1.1-1.15)
+_OVERSHOOT_HEADROOM_PCT = 8.0   # step overshoot below this = room before it gets bouncy
+_ERR_RATIO_SLUGGISH = 0.20      # tracking error / setpoint above this = visible lag
+_DTERM_LPF_LOW_HZ = 200.0       # dterm LPF1 upper cut-off below this adds avoidable D lag
+
+
+def _tuning_suggestions(results: dict, noise: dict, config: dict) -> list[dict]:
+    """Reactivity-oriented headroom notes for a freestyle tune ({fr, en} per item).
+
+    Reads the closed-loop peak (Mt), step overshoot, tracking-error ratio and the
+    filter cut-offs to say where the loop is *conservative* and could be pushed for
+    a snappier feel — the gain/filter advice the metric blocks stop short of giving.
+    Empty when nothing has headroom (already aggressive, or no chirp/step to judge).
+    """
+    out: list[dict] = []
+    pids = (config or {}).get("pids") or {}
+    for axis in AXES:
+        d = results.get(axis) or {}
+        if not d:
+            continue
+        mt = d.get("mt")
+        os_pct = ((d.get("step") or {}).get("metrics") or {}).get("overshoot_pct")
+        err = d.get("track_err_ratio")
+        axis_pids = pids.get(axis) or []
+        p_gain = axis_pids[0] if axis_pids else None
+        d_gain = axis_pids[2] if len(axis_pids) >= 3 else None
+        # Damped loop (Mt under ~1.05) with little/no step overshoot = P has room.
+        damped = mt is not None and mt < _MT_OVERDAMPED
+        low_os = os_pct is None or os_pct < _OVERSHOOT_HEADROOM_PCT
+        if damped and low_os:
+            sluggish = err is not None and err > _ERR_RATIO_SLUGGISH
+            pstr = f" (P actuel {p_gain})" if p_gain else ""
+            erf = f" Suivi de consigne mou (err_ratio {err:.2f})." if sluggish else ""
+            ere = f" Setpoint tracking is loose (err_ratio {err:.2f})." if sluggish else ""
+            # Only pair with a D bump on axes that run D (yaw is usually P/I-only).
+            df_clause = " Monter D en parallèle pour garder l'amortissement." if d_gain else ""
+            de_clause = " Raise D alongside to keep the damping." if d_gain else ""
+            out.append({
+                "axis": axis,
+                "fr": f"{axis} — réactivité dispo : Mt {mt:.2f} (<{_MT_OVERDAMPED}) + overshoot "
+                      f"{0.0 if os_pct is None else os_pct:.0f} % = boucle sur-amortie.{erf} Marge pour "
+                      f"monter P ~+10-15 %{pstr} jusqu'à Mt ~{_MT_SNAPPY} / overshoot ~6-8 %.{df_clause}",
+                "en": f"{axis} — reactivity available: Mt {mt:.2f} (<{_MT_OVERDAMPED}) + overshoot "
+                      f"{0.0 if os_pct is None else os_pct:.0f}% = over-damped loop.{ere} Room to raise P "
+                      f"~+10-15%{pstr} toward Mt ~{_MT_SNAPPY} / overshoot ~6-8%.{de_clause}"})
+    # D-term LPF1 cut-off low + clean noise above 150 Hz = the lag is avoidable.
+    d1 = (config or {}).get("dterm_lpf1") or {}
+    d1hi = (d1.get("dyn") or [None, None])[-1] or d1.get("static")
+    freqs = (noise or {}).get("freqs") or []
+    raw = (noise or {}).get("raw_db") or []
+    if d1hi and freqs and raw:
+        above = [r for f, r in zip(freqs, raw) if f >= 150.0]
+        clean = above and max(above) <= RESIDUAL_OK_DB
+        if d1hi < _DTERM_LPF_LOW_HZ and clean:
+            out.append({
+                "fr": f"D-term LPF1 plafonne à {d1hi:.0f} Hz, mais le gyro est déjà au plancher au-dessus de "
+                      f"150 Hz (+{max(max(above),0):.0f} dB) : ce cut-off bas ajoute du retard de phase D sans "
+                      f"rien filtrer d'utile. Le remonter (~{d1hi:.0f}→250-300 Hz) coupe le lag D et laisse "
+                      f"monter D pour plus de réactivité.",
+                "en": f"D-term LPF1 caps at {d1hi:.0f} Hz, but the gyro is already at the floor above 150 Hz "
+                      f"(+{max(max(above),0):.0f} dB): this low cut-off adds D phase lag without filtering "
+                      f"anything useful. Raising it (~{d1hi:.0f}→250-300 Hz) cuts D lag and lets D go higher "
+                      f"for more reactivity."})
+    return out
+
+
 def _motor_harmonics(df: pd.DataFrame, mask: np.ndarray, poles, fmax: float) -> dict:
     """Motor rotation harmonics from eRPM telemetry, over the quiet window.
 
@@ -1420,6 +1527,49 @@ def _motor_harmonics(df: pd.DataFrame, mask: np.ndarray, poles, fmax: float) -> 
             break
         bands.append({"n": n, "lo": round(n * f_lo, 0), "hi": round(min(n * f_hi, fmax), 0)})
     return {"f_lo": round(f_lo, 0), "f_hi": round(f_hi, 0), "bands": bands}
+
+
+def _pid_balance(df: pd.DataFrame, fs: float) -> dict:
+    """Per-axis P/I/D contribution balance + tracking error, from the logged term columns.
+
+    axisP/axisI/axisD are the actual PID term outputs; their RMS over the active flight tells
+    which term dominates the loop (and the inter-axis balance). The tracking error RMS
+    (setpoint-gyro) is normalised by the setpoint RMS into `err_ratio`, a flight-style-robust
+    quality number folded into the tune score. Returns {axis: {...}} or {} if columns absent.
+    """
+    mask = _active_mask(df)
+    out: dict = {}
+    for i, axis in enumerate(AXES):
+        pcol, icol, dcol = f"axisP[{i}]", f"axisI[{i}]", f"axisD[{i}]"
+        if pcol not in df.columns or icol not in df.columns:
+            continue
+        rms = lambda c: float(np.sqrt(np.mean(np.square(df.loc[mask, c].to_numpy(float))))) \
+            if c in df.columns else 0.0
+        # AC-RMS (mean removed) drives the share split: the I-term carries a large DC
+        # offset (it holds attitude/trim) that raw RMS would count as loop authority,
+        # masking the true P/I/D balance — std() reflects the *active* contribution.
+        acrms = lambda c: float(np.std(df.loc[mask, c].to_numpy(float))) \
+            if c in df.columns else 0.0
+        rp, ri, rd = rms(pcol), rms(icol), rms(dcol)
+        ap, ai, ad = acrms(pcol), acrms(icol), acrms(dcol)
+        tot = ap + ai + ad
+        if tot <= 1e-9:
+            continue
+        entry = {
+            "rms_p": round(rp, 1), "rms_i": round(ri, 1), "rms_d": round(rd, 1),
+            "pct_p": round(100.0 * ap / tot, 0), "pct_i": round(100.0 * ai / tot, 0),
+            "pct_d": round(100.0 * ad / tot, 0),
+        }
+        spcol, gycol = SETPOINT_COL.format(i), GYRO_COL.format(i)
+        if spcol in df.columns and gycol in df.columns:
+            sp = df.loc[mask, spcol].to_numpy(float)
+            gy = df.loc[mask, gycol].to_numpy(float)
+            err = float(np.sqrt(np.mean(np.square(sp - gy))))
+            sp_rms = float(np.sqrt(np.mean(np.square(sp))))
+            entry["err_rms"] = round(err, 1)
+            entry["err_ratio"] = round(err / sp_rms, 3) if sp_rms > 1e-6 else None
+        out[axis] = entry
+    return out
 
 
 def _noise_suggestions(noise: dict) -> list[dict]:
@@ -1653,7 +1803,8 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
         if multi and all(t is not None for t in sweep_thr):
             for p, t in zip(packs, sweep_thr):
                 if p["ms"] is not None:
-                    ms_throttle.append({"throttle_pct": round(t, 0), "ms": p["ms"], "f_ms_hz": p["f_ms"]})
+                    ms_throttle.append({"throttle_pct": round(t, 0), "ms": p["ms"],
+                                        "f_ms_hz": p["f_ms"], "mt": p["mt"]})
             ms_throttle.sort(key=lambda r: r["throttle_pct"])
             # only meaningful if the sweeps actually span a throttle range (≥8 % low→high)
             if len(ms_throttle) < 2 or ms_throttle[-1]["throttle_pct"] - ms_throttle[0]["throttle_pct"] < 8:
@@ -1732,7 +1883,7 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
     throttle_map = {}
     noise = {}
     if primary_axis_idx is not None:
-        throttle_map = _throttle_map(df, fs, primary_axis_idx, fmin, fmax)
+        throttle_map = _throttle_map(df, fs, primary_axis_idx, fmin, fmax, poles=motor_poles)
         # Noise PSD over each axis' chirp-free window (when that axis is NOT being excited),
         # so the renderer's per-axis chips can show roll/pitch/yaw, not just the swept axis.
         thr, idle, _ = _throttle_series(df)
@@ -1941,7 +2092,8 @@ def _synthesis(axes: dict, noise: dict, config: dict, throttle_max: float | None
     return obs
 
 
-SCORE_WEIGHTS = {"overshoot": 0.25, "rise": 0.25, "margin": 0.20, "noise": 0.20, "ms": 0.10}
+SCORE_WEIGHTS = {"overshoot": 0.25, "rise": 0.25, "margin": 0.18, "noise": 0.17,
+                 "ms": 0.10, "track_err": 0.05}
 
 
 def _ramp(v, good, bad):
@@ -1978,12 +2130,18 @@ def _noise_margin_db(d):
 def _axis_score(d):
     """Per-axis composite. Returns {score, subs:{...}} or None if nothing is measurable."""
     sm = (d.get("step") or {}).get("metrics") or {}
+    # Overshoot from the real-flight large-step (non-linear truth) when available, else the
+    # linear chirp step. They never both feed the blend -> no double counting.
+    ov = d.get("os_flight")
+    if ov is None:
+        ov = sm.get("overshoot_pct")
     subs = {
-        "overshoot": _ramp(sm.get("overshoot_pct"), 8.0, 22.0),   # %: target <=8, ceiling ~15, bad >=22
+        "overshoot": _ramp(ov, 8.0, 22.0),                        # %: target <=8, ceiling ~15, bad >=22
         "rise":      _ramp(sm.get("rise_ms"), 15.0, 50.0),         # ms: faster better, floor 15, slow 50
         "margin":    _ramp(d.get("pm_guaranteed_deg"), 45.0, 20.0),# deg guaranteed: >=45 great, <20 risky
         "ms":        _ramp(d.get("ms"), 1.3, 2.2),                 # sensitivity peak: 1.3 healthy, >=2.2 bad
         "noise":     _ramp(_noise_margin_db(d), 32.0, 8.0),        # dB HF head-room: ~32 healthy, <=8 = D ceiling
+        "track_err": _ramp(d.get("track_err_ratio"), 0.15, 0.5),  # normalised setpoint->gyro error: <=0.15 great
     }
     num = den = 0.0
     for k, w in SCORE_WEIGHTS.items():
@@ -2029,6 +2187,57 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
     if thr is not None and thr_src == "rcCommand[3]":
         fly = thr[thr > idle]
         throttle_max = round(float(fly.max()), 0) if fly.size else None
+
+    # Is this a chirp log? Legacy debug[1] axis flag, or the current-firmware debug[0] phase
+    # channel. On a chirp log the closed-loop FRF/Bode/step is the authoritative step and the
+    # real-flight step is hidden; on a NORMAL flight log the chirp FRF is meaningless (no
+    # excitation -> coherence ~0) and the amplitude-binned flight step is the step to trust.
+    _, _active = _reconstruct_exc(df)
+    is_chirp = _has_axis_flag(df) or _active is not None
+
+    # FRF reliability: without a real excitation the setpoint->gyro coherence collapses, so the
+    # Bode / Ms / phase margin / chirp-step and the composite score are meaningless even though the
+    # maths still produces confident-looking numbers. A chirp drives a CONTIGUOUS coherent band
+    # (the swept region), so the discriminator is the *fraction* of the analysed band that clears
+    # the coherence gate — high for a chirp (~0.1-0.3), near zero on normal flight. The renderer
+    # masks the score + evolution and shows a warning banner when it is too low.
+    _fracs = []
+    for _d in results.values():
+        if _d and _d.get("coherence") and _d.get("freq"):
+            _f = np.asarray(_d["freq"], float); _c = np.asarray(_d["coherence"], float)
+            _b = (_f >= fmin) & (_f <= min(fmax, nyq * 0.98))
+            if _b.any():
+                _fracs.append(float(np.mean(_c[_b] >= COHERENCE_GATE)))
+    frf_coherent_frac = round(max(_fracs), 3) if _fracs else None
+    frf_reliable = bool(frf_coherent_frac is not None and frf_coherent_frac >= 0.10)
+
+    # P/I/D balance + tracking error (chirp-independent), and the real-flight step (normal logs only).
+    pid_balance = _pid_balance(df, fs)
+    step_flight = {}
+    if not is_chirp:
+        from . import step as _step
+        try:
+            step_flight = _step.analyse_flight(df, fs, axes_filter)
+        except Exception:
+            logger.exception("step_flight failed")
+            step_flight = {}
+    # Inject the score-feeding fields into each axis BEFORE tune_score reads them:
+    # the normalised tracking error (always) and, on a normal log, the clean large-step overshoot.
+    for ax, d in results.items():
+        if not d:
+            continue
+        pb = pid_balance.get(ax)
+        if pb and pb.get("err_ratio") is not None:
+            d["track_err_ratio"] = pb["err_ratio"]
+        # Only on a normal log, and only when the large step is CLEAN (rise time measurable AND
+        # ≥15 stacked windows): otherwise a ringy deconvolution injects spurious overshoot. On a
+        # chirp log the chirp-step overshoot stands.
+        large = (step_flight.get(ax) or {}).get("large")
+        lm = (large or {}).get("metrics") or {}
+        if large and large.get("n", 0) >= 15 and lm.get("rise_time_ms") is not None \
+                and lm.get("overshoot_pct") is not None:
+            d["os_flight"] = lm["overshoot_pct"]
+
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "file": file,
@@ -2036,16 +2245,23 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
         "input_col": input_col,
         "band_hz": [fmin, round(min(fmax, nyq * 0.98), 1)],
         "throttle_max": throttle_max,
+        "is_chirp": is_chirp,
+        "frf_reliable": frf_reliable,
+        "frf_coherent_frac": frf_coherent_frac,
         "config": config,
         "axes": results,
         "tune_score": _tune_score(results),
         "throttle_map": throttle_map,
         "noise_spectrum": noise,
         "filter_quality": _filter_quality_block(noise),
+        "filter_model": _filter_model_block(config, fs, fmin, fmax),
+        "pid_balance": pid_balance,
+        "step_flight": step_flight,
         "spectrogram": spectro,
         "synthesis": _synthesis(results, noise, config, throttle_max),
         "filter_suggestions": _filter_suggestions(throttle_map, config) if config else [],
         "noise_suggestions": _noise_suggestions(noise) + _filter_disable_notes(noise, config),
+        "tuning_suggestions": _tuning_suggestions(results, noise, config),
     }
 
 

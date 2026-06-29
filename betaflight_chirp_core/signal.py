@@ -62,6 +62,30 @@ def decode_dataframe(raw: bytes, session=None) -> pd.DataFrame:
     )
 
 
+def decode_all_dataframes(raw: bytes) -> list[tuple[int, "pd.DataFrame", int, int]]:
+    """Decode **every** decodable session in the buffer, in file order.
+
+    Returns a list of `(session_index, df, start, end)` — one entry per session
+    that parses AND carries main frames. Empty/header-only sessions (aborted arms)
+    and sessions that fail to parse are skipped silently. `session_index` is
+    1-based into the original `split_sessions` list; `start`/`end` are the byte
+    range, so callers can parse that session's own header config.
+    """
+    ranges = bb.split_sessions(raw)
+    out: list[tuple[int, pd.DataFrame, int, int]] = []
+    for idx, (start, end) in enumerate(ranges, 1):
+        parser = bb.FlightLogParser(raw, start, end)
+        try:
+            parser.parse_header()
+            parser.parse_data()
+        except Exception:  # noqa: BLE001 — a bad session must not sink the others
+            continue
+        if parser.main_frames:
+            df = pd.DataFrame(parser.main_frames, columns=parser.main_field_names)
+            out.append((idx, df, start, end))
+    return out
+
+
 def load_csv(source) -> pd.DataFrame:
     """Read a decoded CSV (skips leading '#' comment lines, trims headers).
 

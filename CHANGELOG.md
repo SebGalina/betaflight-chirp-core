@@ -5,6 +5,55 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.4.0] - 2026-06-28
+
+Merge of the PIDscope-parity line into the filter-quality-rework line (v0.3.0). The
+filter-quality metric is **v0.3.0's** (corner-anchored A, phase-cost preservation,
+directional verdict); the independent fixed-split redesign from the PIDscope branch was
+dropped in its favour. This release adds the PIDscope-parity analysis on top.
+
+### Added
+- Analysis: multi-session decode — `signal.decode_all_dataframes` / `decode_sessions` decode
+  **every** flight in a concatenated `.bbl` (each with its own header config and sample rate).
+  `run()` builds one report pass per session instead of silently keeping only the first;
+  empty/aborted sessions are skipped, explicit `session=` still selects one.
+- Analysis: `analysis/filter_model.py` — analytic Betaflight filter chain (PT1/PT2/PT3 with the
+  BF cutoff correction, biquad lowpass, dynamic notch) reconstructed from the parsed config.
+  Predicted magnitude curve + per-stage group-delay budget (ms) for the gyro and D-term paths.
+  Exposed in `pass["filter_model"]`.
+- Analysis: `pid_balance` block — per-axis P/I/D contribution split by **AC-RMS** (mean removed,
+  so the I-term attitude/trim DC offset does not masquerade as loop authority) + the tracking
+  error (`err_rms`, `err_ratio` = RMS(setpoint−gyro)/RMS(setpoint)). Exposed in `pass["pid_balance"]`.
+- Analysis: `pass["tuning_suggestions"]` — reactivity-oriented headroom block (for freestyle).
+  From `mt`, step overshoot, `track_err_ratio` and the filter cut-offs it flags where the loop is
+  conservative and has room (raise P; raise a low D-term LPF cut-off when the gyro is clean above
+  it). FR/EN, per axis; the D clause is dropped on axes that run no D (yaw).
+- Analysis: `step.analyse_flight` — amplitude-binned, stacked real-flight step response
+  (per-window deconvolution, small vs large stick bins, 20–80th-percentile band, validity-gated).
+  Exposed in `pass["step_flight"]`.
+- Analysis: `pass["is_chirp"]`, `pass["frf_reliable"]`/`frf_coherent_frac`, and
+  `throttle_map["motor_orders"]` (per-throttle-bin motor fundamental from eRPM; `ms_throttle`
+  carries `mt`). The flight step shows only on normal logs; a low-coherence FRF suppresses the
+  Bode-derived score and evolution tiles.
+- Scoring: new `track_err` sub-score (normalised tracking error, weight 0.05); the real-flight
+  large-step overshoot replaces the chirp-step overshoot when it is a clean step.
+
+### Fixed
+- Analysis: filter-model group-delay budget — (1) the dynamic notch no longer reports a ~6.7e8 ms
+  phantom delay (median over the band instead of a mean dominated by the group-delay singularity at
+  the notch null); (2) `dyn_notch_q` is divided by 100 to match firmware (the modelled notch was
+  100x too narrow); (3) a dynamic LPF with `dyn_min_hz = 0` is treated as OFF (firmware falls back
+  to static), so a disabled stage no longer contributes a phantom cut-off and delay.
+
+### Notes
+- Renderer: the PIDscope-parity visual blocks (filter delay-budget gauge, P/I/D balance bars,
+  real-flight step panel, Mt-vs-throttle tile, motor-order overlay) are **not yet ported** to the
+  reworked v0.3.0 renderer — their data is exposed in the pass JSON; the rendering is a follow-up.
+  The current report renderer is v0.3.0's (filter-quality gauge, D-term SNR tile, reoriented
+  throttle map).
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
@@ -190,7 +239,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release: package scaffold, `.bbl` decoder, `signal`/`config`,
   chirp FRF/Bode analysis, and the self-contained HTML report.
 
-[Unreleased]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.9...v0.2.0
+[0.1.9]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/SebGalina/betaflight-chirp-core/compare/v0.1.5...v0.1.6

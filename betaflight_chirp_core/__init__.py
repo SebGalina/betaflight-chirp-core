@@ -20,9 +20,12 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 
-__all__ = ["decode", "analyse_log", "assemble_report", "build_report", "run",
-           "AnalysisResult", "decoder", "signal", "config", "analyse", "build_pass",
-           "noise_margin_db"]
+__all__ = ["decode", "decode_sessions", "analyse_log", "assemble_report",
+           "build_report", "run", "AnalysisResult", "decoder", "signal", "config",
+           "analyse", "build_pass", "noise_margin_db"]
+
+# Header config lives in the first 64 KB after a session's start marker.
+_HEADER_WINDOW = 65536
 
 
 @dataclass
@@ -47,6 +50,23 @@ def decode(bbl_bytes: bytes, session=None):
     return df, fs, cfg
 
 
+def decode_sessions(bbl_bytes: bytes):
+    """Decode every decodable session into `(index, df, fs, config)` tuples.
+
+    One entry per session that carries flight data (empty/aborted sessions skipped).
+    Each session's config is parsed from **its own** header (settings can differ
+    between flights), and `fs` from its own time base.
+    """
+    from . import config as _config
+    from . import signal as _signal
+    out = []
+    for idx, df, start, _end in _signal.decode_all_dataframes(bbl_bytes):
+        fs = _signal.sample_rate(df)
+        cfg = _config.parse_header_config(bbl_bytes[start:start + _HEADER_WINDOW])
+        out.append((idx, df, fs, cfg))
+    return out
+
+
 def analyse_log(df, fs, config, **params) -> dict:
     """One decoded log -> one self-contained 'pass' dict.
 
@@ -69,13 +89,38 @@ def build_report(passes, lang: str = "fr") -> str:
 
 
 def run(bbl_bytes: bytes, params: dict | None = None) -> AnalysisResult:
-    """Full single-pass pipeline: decode + analyse + render, in one call."""
+    """Full pipeline: decode + analyse + render, in one call.
+
+    With an explicit `session`, analyses that one. Otherwise analyses **every**
+    decodable session and renders them as N passes in a single report (multi-flight
+    `.bbl` files are no longer silently reduced to their first session). `metrics`
+    and `raw` carry the first pass for back-compat; `report_html` covers them all.
+    """
     params = dict(params or {})
     session = params.pop("session", None)
-    df, fs, cfg = decode(bbl_bytes, session)
-    a_pass = analyse_log(df, fs, cfg, **params)
-    html = build_report([a_pass])
-    return AnalysisResult(metrics=a_pass["axes"], report_html=html, raw=a_pass)
+
+    if session is not None:
+        df, fs, cfg = decode(bbl_bytes, session)
+        passes = [analyse_log(df, fs, cfg, **params)]
+    else:
+        base_file = params.pop("file", None)
+        sessions = decode_sessions(bbl_bytes)
+        passes = []
+        for idx, df, fs, cfg in sessions:
+            # Label each pass with its session number when there is more than one,
+            # so the report frieze tells the flights apart; keep the bare file name
+            # for a single-session log (unchanged single-flight reports).
+            if len(sessions) > 1:
+                label = f"{base_file} — session {idx}" if base_file else f"session {idx}"
+            else:
+                label = base_file or ""
+            passes.append(analyse_log(df, fs, cfg, file=label, **params))
+        if not passes:  # nothing decodable: fall back to the original single path
+            df, fs, cfg = decode(bbl_bytes)
+            passes = [analyse_log(df, fs, cfg, file=base_file or "", **params)]
+
+    html = build_report(passes)
+    return AnalysisResult(metrics=passes[0]["axes"], report_html=html, raw=passes[0])
 
 
 def __getattr__(name):
