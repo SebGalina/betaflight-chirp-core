@@ -14,20 +14,24 @@ from .analysis.chirp import COHERENCE_GATE, RESIDUAL_OK_DB
 MAX_OVERLAY_PASSES = 8
 
 # Per-axis fields the renderer needs from a NON-primary pass: the gyro raw/filtered PSD curves (for the
-# per-pass overlay on the noise panel) and the D-term SNR scalar (for the evolution tile). Everything
-# else (peaks, motor/dterm spectra, filter_quality) is primary-only and dropped to keep the HTML light.
+# per-pass overlay on the noise panel) and the D-term SNR scalar (for the evolution tile). The top-level
+# `dterm` block (D-term/motor-output spectrum) is ALSO kept so that block follows the pass selection.
+# Everything else (per-axis peaks/motor, filter_quality) is primary-only and dropped to keep HTML light.
 _NOISE_SLIM_KEYS = ("axis", "has_unfilt", "freqs", "raw_db", "filt_db", "dterm_snr_db")
 
 
 def _slim_noise(ns: dict) -> dict:
-    """Keep only the per-axis curves + D-term SNR a non-primary pass is overlaid/tiled with."""
+    """Keep the per-axis curves + D-term SNR + the D-term/motor spectrum a non-primary pass renders."""
     axes = ns.get("axes") or {}
     slim = {}
     for a, d in axes.items():
         kept = {k: d[k] for k in _NOISE_SLIM_KEYS if k in d}
         if kept:
             slim[a] = kept
-    return {"axes": slim} if slim else {}
+    out = {"axes": slim} if slim else {}
+    if ns.get("dterm"):
+        out["dterm"] = ns["dterm"]      # spectre D-term/moteur par passe (suit la sélection de passe)
+    return out
 
 
 def _assemble_report(passes: list, lang: str = "fr") -> dict:
@@ -45,9 +49,9 @@ def _assemble_report(passes: list, lang: str = "fr") -> dict:
         p["diff"] = config_diff(shown[k - 1]["config"], p["config"]) if k > 0 else ""
         # only the primary pass renders its heatmaps -> drop them from the others to keep the HTML light.
         # noise_spectrum is kept but SLIMMED on the others: the renderer overlays their gyro raw/filt
-        # PSD on the noise panel (per-pass pills) and plots their D-term SNR in the evolution tile, so
-        # the per-axis curves + the SNR scalar must survive — but the heavy peaks/motor/dterm/FQ blocks
-        # (only ever shown for the primary) are dropped.
+        # PSD on the noise panel (per-pass pills), plots their D-term SNR in the evolution tile, and
+        # renders their D-term/motor spectrum when the pass is selected — so the per-axis curves, the
+        # SNR scalar and the top-level `dterm` block survive; the per-axis peaks/motor + FQ are dropped.
         if k != primary:
             for heavy in ("spectrogram", "throttle_map", "step_flight"):
                 p.pop(heavy, None)
@@ -445,10 +449,16 @@ STRINGS = {
         "overlay_hint": "pastilles en haut à droite de chaque axe : clique une passe pour masquer/afficher ses courbes",
         "pill_off": "masquée",
         "tmap_howto": "Comment lire — chaque ligne = une tranche de gaz (ralenti en bas, plein gaz en haut), "
-                      "couleur = puissance de bruit du gyro à cette fréquence. Une raie verticale qui <b>monte en "
-                      "fréquence quand le gaz augmente</b> = harmonique moteur ; une raie à <b>fréquence fixe</b> "
-                      "quel que soit le gaz = résonance de cadre/pale.",
+                      "couleur = puissance de bruit du gyro à cette fréquence. Une raie qui <b>monte en diagonale</b> "
+                      "(la fréquence croît avec le gaz) = harmonique moteur ; une raie <b>verticale</b> à fréquence "
+                      "fixe quel que soit le gaz = résonance de cadre/pale.",
         "tmap_lo": "peu de bruit", "tmap_hi": "beaucoup",
+        "rpmmap_h": "Carte fréquence × RPM moteur",
+        "rpmmap_howto": "Comme la carte précédente mais l'axe vertical = RPM moteur réel (eRPM), pas le gaz. "
+                        "Les harmoniques moteur ressortent alors en <b>crêtes diagonales droites</b> (à un RPM "
+                        "donné la n-ième harmonique est exactement à n×RPM/60). Les diagonales fines 1×–4× sont "
+                        "des repères : une crête de bruit posée dessus = bruit moteur (filtre RPM / dyn_notch) ; "
+                        "une crête <b>verticale</b> = résonance de cadre/pale.",
         "mapex_h": "Exemple — à quoi ressemble une MAUVAISE carte",
         "mapex_cap": "Une raie qui MONTE en fréquence avec le gaz = harmonique moteur (à traiter par RPM filter / dyn_notch). "
                      "Une raie VERTICALE à fréquence fixe = résonance de cadre/pale (notch). Une bonne carte : plancher bas "
@@ -481,6 +491,9 @@ STRINGS = {
                   "Score = moyenne harmonique (pénalise le maillon faible) · vert ≥ 0.8 · ambre 0.6–0.8 · rouge < 0.6 · "
                   "▲ renforcer · ▼ alléger · ● équilibré",
         "fq_lag": "retard de phase",
+        "fq_looplag": "Lag boucle (mesuré)",
+        "fq_looplag_hint": "retard de groupe boucle fermée mesuré (FRF) — diminue quand le tune se "
+                           "resserre ; distinct du coût de phase filtre (Préservation)",
         "fq_band_ctrl": "bande contrôle ≤",
         "fq_band_corner": "corner LPF",
         "fq_resid_warn": "pic résiduel au-dessus du plancher :",
@@ -575,10 +588,16 @@ STRINGS = {
         "overlay_hint": "pills at the top-right of each axis: click a pass to hide/show its curves",
         "pill_off": "hidden",
         "tmap_howto": "How to read — each row = a throttle slice (idle at the bottom, full throttle at the top), "
-                      "colour = gyro noise power at that frequency. A vertical line that <b>climbs in frequency as "
-                      "throttle rises</b> = a motor harmonic; a <b>fixed-frequency</b> line at any throttle = a "
-                      "frame/prop resonance.",
+                      "colour = gyro noise power at that frequency. A line that <b>climbs diagonally</b> (frequency "
+                      "rising with throttle) = a motor harmonic; a <b>vertical</b> fixed-frequency line at any "
+                      "throttle = a frame/prop resonance.",
         "tmap_lo": "low noise", "tmap_hi": "high",
+        "rpmmap_h": "Frequency × motor-RPM map",
+        "rpmmap_howto": "Same as the map above but the vertical axis = measured motor RPM (eRPM), not "
+                        "throttle. Motor harmonics then stand out as <b>straight diagonal ridges</b> (at a "
+                        "given RPM the n-th harmonic is exactly at n×RPM/60). The faint 1×–4× diagonals are "
+                        "guides: a noise ridge sitting on one = motor noise (RPM filter / dyn_notch); a "
+                        "<b>vertical</b> ridge = a frame/prop resonance.",
         "mapex_h": "Example — what a BAD map looks like",
         "mapex_cap": "A line that CLIMBS in frequency with throttle = a motor harmonic (handled by the RPM filter / "
                      "dyn_notch). A FIXED-frequency vertical line = a frame/prop resonance (notch). A good map: a low, "
@@ -611,6 +630,9 @@ STRINGS = {
                   "Score = harmonic mean (penalises weakest link) · green ≥ 0.8 · amber 0.6–0.8 · red < 0.6 · "
                   "▲ tighten · ▼ loosen · ● balanced",
         "fq_lag": "phase lag",
+        "fq_looplag": "Loop lag (measured)",
+        "fq_looplag_hint": "measured closed-loop group delay (FRF) — drops as the tune tightens; "
+                           "distinct from the filter phase cost (Preservation)",
         "fq_band_ctrl": "control band ≤",
         "fq_band_corner": "LPF corner",
         "fq_resid_warn": "residual peak above the floor:",

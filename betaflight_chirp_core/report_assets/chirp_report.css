@@ -13,6 +13,6 @@
      padding:4px 11px; font:600 11px ui-monospace,Consolas,monospace; color:#d4e6fb; white-space:nowrap; }.chirp-report .pipe b .nidx { font:700 10px ui-monospace,Consolas,monospace; color:#5f7da0; }.chirp-report .pipe .arr { color:#3f6a93; margin:0 1px; font-size:14px; vertical-align:middle; }.chirp-report .ptip { position:fixed; z-index:60; pointer-events:none; display:none; background:#0b0e13; color:#e6eaf2;
      border:1px solid #3a5a78; border-radius:5px; padding:3px 7px; font:11px ui-monospace,Consolas,monospace;
      box-shadow:0 4px 12px rgba(0,0,0,.55); }.chirp-report .scalebar { display:inline-block; height:10px; width:120px; vertical-align:middle; margin:0 6px;
-     border-radius:2px; background:linear-gradient(90deg, rgb(0,120,255), rgb(150,90,170), rgb(255,40,30)); }.chirp-report .langbtn { position:absolute; top:16px; right:16px; z-index:30; background:#28425c; color:#cfe3ff;
+     border-radius:2px; background:linear-gradient(90deg, hsl(120,100%,12%), hsl(50,100%,50%), hsl(0,0%,100%)); }.chirp-report .langbtn { position:absolute; top:16px; right:16px; z-index:30; background:#28425c; color:#cfe3ff;
      border:1px solid #3a5a78; border-radius:6px; padding:5px 12px; cursor:pointer; font:600 12px system-ui; }.chirp-report .twocol { display:flex; gap:14px; flex-wrap:wrap; }.chirp-report .twocol > div { flex:1 1 380px; }
 .chirp-report { position:relative; }

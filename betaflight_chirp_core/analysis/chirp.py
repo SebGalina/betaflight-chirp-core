@@ -570,6 +570,80 @@ def _throttle_map(df: pd.DataFrame, fs: float, axis_idx: int, fmin: float, fmax:
     return out
 
 
+def _rpm_map(df: pd.DataFrame, fs: float, axis_idx: int, fmin: float, fmax: float,
+             poles=None, nbins: int = 90) -> dict:
+    """Frequency × motor-RPM heatmap, Blackbox-Explorer style (sliding-window accumulation).
+
+    Short FFT windows slide over the whole log; each window is dropped into the RPM row that matches
+    the *motor RPM measured during that window* (from eRPM) and its spectrum is averaged in. Because
+    every window lands in its exact RPM row, motor harmonics line up across rows into sharp straight
+    diagonals (freq = n·f0). This resolves the ridges that a few wide RPM slices + one Welch each
+    would smear out. The whole flown RPM span (1st–99th pct) is covered, not just the densest middle.
+    """
+    # UNFILTERED gyro (like Blackbox Explorer): the gyro filters exist to REMOVE motor harmonics, so
+    # on filtered gyroADC the ridges are already gone — gyroUnfilt shows them at full strength.
+    ucol = f"gyroUnfilt[{axis_idx}]"
+    gcol = ucol if ucol in df.columns else GYRO_COL.format(axis_idx)
+    ecols = [f"eRPM[{i}]" for i in range(4) if f"eRPM[{i}]" in df.columns]
+    if not poles or not ecols or gcol not in df.columns:
+        return {}
+    g = df[gcol].to_numpy(float)
+    erpm = df[ecols].to_numpy(float)
+    erpm[erpm <= 0] = np.nan
+    with np.errstate(invalid="ignore"):            # per-sample motor fundamental (Hz); eRPM is in 100-eRPM LSBs
+        f0 = np.nanmean(erpm, axis=1) * 100.0 / (poles / 2.0) / 60.0
+    n = len(g)
+    win = 512 if fs <= 4500 else 1024
+    hop = win // 4
+    if n < win * 4 or int(np.isfinite(f0).sum()) < win * 4:
+        return {}
+    flo, fhi = (float(x) for x in np.nanpercentile(f0[np.isfinite(f0)], [2, 98]))   # flown RPM span (trim outliers)
+    if fhi - flo < 10.0:
+        return {}
+    freqs = np.fft.rfftfreq(win, d=1.0 / fs)
+    sel = (freqs >= fmin) & (freqs <= fmax)
+    if not sel.any():
+        return {}
+    window = np.hanning(win)
+    acc = np.zeros((nbins, int(sel.sum())))
+    cnt = np.zeros(nbins, dtype=int)
+    for start in range(0, n - win, hop):
+        sl = slice(start, start + win)
+        rpmw = float(np.nanmean(f0[sl]))
+        if not np.isfinite(rpmw):
+            continue
+        b = int((rpmw - flo) / (fhi - flo) * nbins)
+        if b < 0 or b >= nbins:
+            continue                               # excursions outside the 1–99 pct span are dropped
+        seg = g[sl]
+        sp = np.abs(np.fft.rfft((seg - seg.mean()) * window)) ** 2
+        acc[b] += sp[sel]
+        cnt[b] += 1
+    if int((cnt > 0).sum()) < 4:
+        return {}
+    # Crop the RPM axis to the densely-sampled span: drop the sparse idle / brief-peak tails that
+    # would otherwise squash the useful, well-populated band into a thin sliver.
+    dense = np.where(cnt >= max(2, int(0.04 * cnt.max())))[0]
+    if dense.size < 4:
+        return {}
+    b0, b1 = int(dense[0]), int(dense[-1])
+    fsel = freqs[sel]
+    step = max(1, len(fsel) // 220)
+    edges = np.linspace(flo, fhi, nbins + 1)
+    centers, levels = [], []
+    for b in range(b0, b1 + 1):
+        centers.append(float((edges[b] + edges[b + 1]) / 2.0))
+        levels.append(None if cnt[b] == 0 else
+                      (10.0 * np.log10(acc[b] / cnt[b] + 1e-12))[::step].round(1).tolist())
+    return {
+        "axis": AXES[axis_idx],
+        "rpm_bins": [round(c * 60.0) for c in centers],   # rotation Hz -> motor RPM (Y axis)
+        "f0_bins": [round(c, 1) for c in centers],        # rotation fundamental Hz (for the n× ridges)
+        "freqs": [round(float(x), 1) for x in fsel[::step]],
+        "levels_db": levels,
+    }
+
+
 def _spectrogram(sig: np.ndarray, fs: float, fmin: float = 5.0, fmax: float | None = None,
                  ntime: int = 200, nfreq: int = 140) -> dict:
     """Time x frequency STFT (dB) of the chirp window — shows the swept sine as a rising diagonal,
@@ -1881,9 +1955,11 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
         }
 
     throttle_map = {}
+    rpm_map = {}
     noise = {}
     if primary_axis_idx is not None:
         throttle_map = _throttle_map(df, fs, primary_axis_idx, fmin, fmax, poles=motor_poles)
+        rpm_map = _rpm_map(df, fs, primary_axis_idx, fmin, fmax, poles=motor_poles)
         # Noise PSD over each axis' chirp-free window (when that axis is NOT being excited),
         # so the renderer's per-axis chips can show roll/pitch/yaw, not just the swept axis.
         thr, idle, _ = _throttle_series(df)
@@ -1946,7 +2022,7 @@ def analyse(df, fs, input_col, axes_filter=None, fmin=DEFAULT_FMIN, fmax=DEFAULT
             if spectro:
                 spectro["axis"] = AXES[primary_axis_idx]
 
-    return results, throttle_map, noise, spectro
+    return results, throttle_map, rpm_map, noise, spectro
 
 
 def _psd_resonances(throttle_map: dict) -> list[dict]:
@@ -2178,7 +2254,7 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
     """Run the analysis on one decoded log and package it as a self-contained 'pass'."""
     config = config or {}
     axes_filter = [axis] if axis else None
-    results, throttle_map, noise, spectro = analyse(
+    results, throttle_map, rpm_map, noise, spectro = analyse(
         df, fs, input_col, axes_filter, fmin=fmin, fmax=fmax, nperseg=nperseg,
         motor_poles=config.get("motor_poles"), config=config)
     nyq = fs / 2.0
@@ -2252,6 +2328,7 @@ def build_pass(df, fs, config, *, file="", input_col=DEFAULT_INPUT_COL,
         "axes": results,
         "tune_score": _tune_score(results),
         "throttle_map": throttle_map,
+        "rpm_map": rpm_map,
         "noise_spectrum": noise,
         "filter_quality": _filter_quality_block(noise),
         "filter_model": _filter_model_block(config, fs, fmin, fmax),
