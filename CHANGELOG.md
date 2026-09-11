@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Analysis: `_rpm_map` no longer crashes with
+  `ValueError: assignment destination is read-only` on any log carrying eRPM.
+  pandas 3.0 made copy-on-write unconditional, so `df[cols].to_numpy(float)` now
+  returns a NON-writeable array for every frame shape, and the in-place eRPM
+  masking wrote straight into it. The package pins only `pandas>=2.0.0`, so a
+  fresh install picks up pandas 3 and the whole chirp report pipeline
+  (`analyse_log` -> `build_pass` -> `analyse`) dies before producing any HTML.
+  Fixed with an explicit `copy=True`, which also keeps the masking from reaching
+  back into the caller's DataFrame. Covered by `tests/test_rpm_map.py`
+  (synthetic frame, no fixture needed).
+
 ## [0.4.0] - 2026-06-28
 
 Merge of the PIDscope-parity line into the filter-quality-rework line (v0.3.0). The
