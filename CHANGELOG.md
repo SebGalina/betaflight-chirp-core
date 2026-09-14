@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-14
+
 ### Fixed
 - Analysis: `_rpm_map` no longer crashes with
   `ValueError: assignment destination is read-only` on any log carrying eRPM.
@@ -18,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fixed with an explicit `copy=True`, which also keeps the masking from reaching
   back into the caller's DataFrame. Covered by `tests/test_rpm_map.py`
   (synthetic frame, no fixture needed).
+
+### Changed
+- Packaging: `pandas` is now capped at `<4`. The break above arrived through an
+  unbounded `>=2.0.0` on a major release that changed a documented behaviour; the
+  cap makes the next major an explicit decision instead of a silent breakage for
+  everyone installing fresh.
 
 ## [0.4.0] - 2026-06-28
 
