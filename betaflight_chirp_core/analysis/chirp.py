@@ -588,7 +588,9 @@ def _rpm_map(df: pd.DataFrame, fs: float, axis_idx: int, fmin: float, fmax: floa
     if not poles or not ecols or gcol not in df.columns:
         return {}
     g = df[gcol].to_numpy(float)
-    erpm = df[ecols].to_numpy(float)
+    # copy=True is load-bearing: on a single-block frame pandas hands back a read-only
+    # view, and the masking below then raises "assignment destination is read-only".
+    erpm = df[ecols].to_numpy(float, copy=True)
     erpm[erpm <= 0] = np.nan
     with np.errstate(invalid="ignore"):            # per-sample motor fundamental (Hz); eRPM is in 100-eRPM LSBs
         f0 = np.nanmean(erpm, axis=1) * 100.0 / (poles / 2.0) / 60.0
